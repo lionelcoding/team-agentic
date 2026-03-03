@@ -1,24 +1,40 @@
 "use client"
 
-import { useState, useMemo } from "react"
-import { Settings2, Radio } from "lucide-react"
+import { useState, useMemo, useEffect } from "react"
+import { Settings2, Radio, Loader2 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { SignalTabNav } from "./signal-tab-nav"
 import { SignalFilters, type FilterState } from "./signal-filters"
 import { SignalCard } from "./signal-card"
 import { SignalStatsSidebar } from "./signal-stats-sidebar"
 import { SignalPlaceholderTab } from "./signal-placeholder-tab"
-import { SIGNAL_ITEMS, type SignalItem, type SignalTab } from "@/lib/signal-data"
+import type { SignalItem, SignalTab } from "@/lib/signal-data"
+import { getSignalItems } from "@/lib/supabase/queries"
 
 export function SignalPage() {
   const [activeTab, setActiveTab] = useState<SignalTab>("knowledge")
-  const [signals, setSignals] = useState<SignalItem[]>(SIGNAL_ITEMS)
+  const [signals, setSignals] = useState<SignalItem[]>([])
+  const [loading, setLoading] = useState(true)
   const [filters, setFilters] = useState<FilterState>({
     sources: [],
     impacts: [],
     status: "all",
     dateRange: "24h",
   })
+
+  useEffect(() => {
+    async function fetchSignals() {
+      try {
+        const items = await getSignalItems()
+        setSignals(items)
+      } catch (err) {
+        console.error("Failed to fetch signals:", err)
+      } finally {
+        setLoading(false)
+      }
+    }
+    fetchSignals()
+  }, [])
 
   const knowledgeSignals = useMemo(
     () => signals.filter((s) => s.tab === "knowledge"),
@@ -36,6 +52,15 @@ export function SignalPage() {
 
   const handleStatusChange = (id: string, status: SignalItem["status"]) => {
     setSignals((prev) => prev.map((s) => (s.id === id ? { ...s, status } : s)))
+  }
+
+  if (loading) {
+    return (
+      <div className="flex flex-col items-center justify-center py-20 gap-3">
+        <Loader2 size={32} className="text-purple-400 animate-spin" />
+        <p className="text-sm text-slate-500">Chargement des signaux...</p>
+      </div>
+    )
   }
 
   return (
