@@ -56,8 +56,8 @@ const navItems: NavItem[] = [
   },
   { label: 'Analytics', icon: BarChart3, href: '/analytics' },
   { label: 'Rewards', icon: Trophy, href: '/rewards' },
-  { label: 'Coûts', icon: DollarSign, href: '/costs' },
-  { label: 'Paramètres', icon: Settings, href: '/settings' },
+  { label: 'CoÃ»ts', icon: DollarSign, href: '/costs' },
+  { label: 'ParamÃ¨tres', icon: Settings, href: '/settings' },
 ]
 
 interface SidebarProps {
@@ -94,7 +94,7 @@ export function Sidebar({ collapsed, onToggle }: SidebarProps) {
           collapsed && 'justify-center px-0'
         )}
         onClick={onToggle}
-        title={collapsed ? 'Développer la sidebar' : 'Réduire la sidebar'}
+        title={collapsed ? 'DÃ©velopper la sidebar' : 'RÃ©duire la sidebar'}
       >
         <div className="flex items-center justify-center w-8 h-8 rounded-lg bg-blue-600 shrink-0">
           <Zap className="w-4 h-4 text-white" />
@@ -119,7 +119,8 @@ export function Sidebar({ collapsed, onToggle }: SidebarProps) {
           return (
             <div key={item.href}>
               {hasChildren ? (
-                <button
+                <Link
+                  href={item.href}
                   onClick={() => toggleSubmenu(item.href)}
                   className={cn(
                     'w-full flex items-center gap-3 px-3 py-2 rounded-md text-sm font-medium transition-all duration-150 group relative',
@@ -170,7 +171,7 @@ export function Sidebar({ collapsed, onToggle }: SidebarProps) {
                       {item.badge}
                     </span>
                   )}
-                </button>
+                </Link>
               ) : (
                 <Link
                   href={item.href}
