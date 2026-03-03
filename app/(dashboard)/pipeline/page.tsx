@@ -1,10 +1,11 @@
 "use client"
 
-import { useState } from "react"
+import { useState, useEffect } from "react"
 import {
   LayoutGrid, Table2, Plus, X, TrendingUp, Users,
-  Calendar, DollarSign, ChevronRight, Search,
+  Calendar, DollarSign, ChevronRight, Search, Loader2,
 } from "lucide-react"
+import { createClient } from "@/lib/supabase/client"
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -32,58 +33,46 @@ interface Column {
   leads:  Lead[]
 }
 
-// ─── Mock data ─────────────────────────────────────────────────────────────────
+// ─── DB → Pipeline mapping ─────────────────────────────────────────────────────
 
-const INITIAL_COLUMNS: Column[] = [
-  {
-    id: "new_lead", label: "Nouveau Lead", color: "text-slate-400", dotColor: "bg-slate-500",
-    leads: [
-      { id:"l1",  company:"TechVision SAS",  contact:"Pierre Dupont",  role:"CTO",        score:82, agent:"Iris",   agentInitials:"IR", lastAction:"Signal BODACC détecté",   timestamp:"il y a 2h",  tags:["SaaS","B2B"]         },
-      { id:"l2",  company:"DataFlow Inc",    contact:"Marie Lambert",  role:"VP Eng",     score:78, agent:"Hugo",   agentInitials:"HU", lastAction:"Fiche enrichie",          timestamp:"il y a 4h",  tags:["Data","Scale-up"]    },
-      { id:"l3",  company:"CloudNine",       contact:"Jean Moreau",    role:"CEO",        score:91, agent:"Iris",   agentInitials:"IR", lastAction:"Score ICP calculé",       timestamp:"il y a 5h",  tags:["Cloud","IA"]         },
-      { id:"l4",  company:"InnovateLab",     contact:"Sophie Chen",    role:"CTO",        score:73, agent:"Diane",  agentInitials:"DI", lastAction:"Scoring en cours",        timestamp:"il y a 6h",  tags:["DeepTech"]           },
-      { id:"l5",  company:"QuantumSoft",     contact:"Luc Bernard",    role:"Head of AI", score:88, agent:"Hugo",   agentInitials:"HU", lastAction:"LinkedIn identifié",      timestamp:"il y a 8h",  tags:["IA","Série A"]       },
-    ],
-  },
-  {
-    id: "enriched", label: "Enrichi", color: "text-blue-400", dotColor: "bg-blue-500",
-    leads: [
-      { id:"l6",  company:"AlphaMetrics",    contact:"Claire Dubois",  role:"CFO",        score:85, agent:"Simon",  agentInitials:"SI", lastAction:"Email personnalisé prêt", timestamp:"il y a 3h",  tags:["Fintech","PME"]      },
-      { id:"l7",  company:"BetaLogic",       contact:"Antoine Petit",  role:"CTO",        score:79, agent:"Hugo",   agentInitials:"HU", lastAction:"Stack tech identifiée",  timestamp:"il y a 5h",  tags:["DevOps"]             },
-      { id:"l8",  company:"GammaTech",       contact:"Isabelle Roy",   role:"VP Product", score:90, agent:"Diane",  agentInitials:"DI", lastAction:"Score ICP : Excellent",  timestamp:"il y a 7h",  tags:["Product","SaaS"]     },
-      { id:"l9",  company:"DeltaAI",         contact:"Marc Fontaine",  role:"CEO",        score:76, agent:"Simon",  agentInitials:"SI", lastAction:"Enrichissement validé",  timestamp:"il y a 9h",  tags:["IA","Seed"]          },
-    ],
-  },
-  {
-    id: "contacted", label: "Contacté", color: "text-yellow-400", dotColor: "bg-yellow-500",
-    leads: [
-      { id:"l10", company:"EpsilonData",     contact:"Nathalie Blanc",  role:"CTO",       score:87, agent:"Alice",  agentInitials:"AL", lastAction:"Email #1 ouvert (68%)",  timestamp:"il y a 1j",  tags:["Data","Série B"]     },
-      { id:"l11", company:"ZetaCloud",       contact:"Thomas Girard",   role:"VP Eng",    score:81, agent:"Alice",  agentInitials:"AL", lastAction:"Email #2 envoyé",        timestamp:"il y a 2j",  tags:["Cloud"]              },
-      { id:"l12", company:"EtaSoft",         contact:"Emilie Lefort",   role:"Head Data", score:74, agent:"Simon",  agentInitials:"SI", lastAction:"Séquence step 2",        timestamp:"il y a 2j",  tags:["Analytics"]          },
-    ],
-  },
-  {
-    id: "responded", label: "Réponse reçue", color: "text-orange-400", dotColor: "bg-orange-500",
-    leads: [
-      { id:"l13", company:"ThetaAI",         contact:"Nicolas Mercier", role:"CEO",       score:93, agent:"Thomas", agentInitials:"TH", lastAction:"Réponse positive reçue", timestamp:"il y a 3h",  tags:["IA","Série A"]       },
-      { id:"l14", company:"IotaTech",        contact:"Cécile Aubert",   role:"CTO",       score:86, agent:"Thomas", agentInitials:"TH", lastAction:"Intérêt démontré",       timestamp:"il y a 6h",  tags:["IoT","Scale-up"]     },
-    ],
-  },
-  {
-    id: "meeting", label: "RDV Programmé", color: "text-emerald-400", dotColor: "bg-emerald-500",
-    leads: [
-      { id:"l15", company:"KappaLabs",       contact:"Frédéric Simon",  role:"VP Product",score:95, agent:"Victor", agentInitials:"VI", lastAction:"Démo planifiée 14h",     timestamp:"demain",      tags:["Biotech","Série C"]  },
-      { id:"l16", company:"LambdaInc",       contact:"Amélie Rousseau", role:"CTO",       score:89, agent:"Victor", agentInitials:"VI", lastAction:"Call découverte fixé",   timestamp:"vendredi",    tags:["SaaS","B2B"]         },
-    ],
-  },
-  {
-    id: "converted", label: "Converti", color: "text-green-400", dotColor: "bg-green-500",
-    leads: [
-      { id:"l17", company:"MuSystems",       contact:"Laurent Perrin",  role:"CEO",       score:97, agent:"Margaux",agentInitials:"MA", lastAction:"Contrat signé",          timestamp:"il y a 2j",  deal:"€45K", tags:["Scale-up","IA"]      },
-      { id:"l18", company:"NuDigital",       contact:"Patricia Leroy",  role:"CTO",       score:91, agent:"Margaux",agentInitials:"MA", lastAction:"Onboarding démarré",     timestamp:"il y a 4j",  deal:"€32K", tags:["Digital","Martech"]  },
-    ],
-  },
+const STATUS_TO_COLUMN: Record<string, ColumnId> = {
+  sourced:      "new_lead",
+  enriched:     "enriched",
+  scored:       "contacted",
+  activated:    "responded",
+  active_client:"meeting",
+  ambassador:   "converted",
+  churning:     "meeting",
+  churned:      "new_lead",
+  archived:     "new_lead",
+  non_eligible: "new_lead",
+}
+
+const EMPTY_COLUMNS: Column[] = [
+  { id: "new_lead",  label: "Nouveau Lead",  color: "text-slate-400",   dotColor: "bg-slate-500",   leads: [] },
+  { id: "enriched",  label: "Enrichi",       color: "text-blue-400",    dotColor: "bg-blue-500",    leads: [] },
+  { id: "contacted", label: "Contacté",      color: "text-yellow-400",  dotColor: "bg-yellow-500",  leads: [] },
+  { id: "responded", label: "Réponse reçue", color: "text-orange-400",  dotColor: "bg-orange-500",  leads: [] },
+  { id: "meeting",   label: "RDV Programmé", color: "text-emerald-400", dotColor: "bg-emerald-500", leads: [] },
+  { id: "converted", label: "Converti",      color: "text-green-400",   dotColor: "bg-green-500",   leads: [] },
 ]
+
+function timeAgo(dateStr: string): string {
+  const now = new Date()
+  const d = new Date(dateStr)
+  const diffMs = now.getTime() - d.getTime()
+  const hours = Math.floor(diffMs / 3600000)
+  if (hours < 1) return "à l'instant"
+  if (hours < 24) return `il y a ${hours}h`
+  const days = Math.floor(hours / 24)
+  if (days === 1) return "il y a 1j"
+  if (days < 30) return `il y a ${days}j`
+  return `il y a ${Math.floor(days / 30)} mois`
+}
+
+function getInitials(name: string): string {
+  return name.split("_").map(w => w[0]?.toUpperCase() ?? "").join("").slice(0, 2)
+}
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -278,7 +267,8 @@ function TableView({ columns, onLeadClick }: { columns: Column[]; onLeadClick: (
 // ─── Page ─────────────────────────────────────────────────────────────────────
 
 export default function PipelinePage() {
-  const [columns,    setColumns]    = useState<Column[]>(INITIAL_COLUMNS)
+  const [columns,    setColumns]    = useState<Column[]>(EMPTY_COLUMNS)
+  const [loading,    setLoading]    = useState(true)
   const [view,       setView]       = useState<"kanban" | "table">("kanban")
   const [search,     setSearch]     = useState("")
   const [dragId,     setDragId]     = useState<string | null>(null)
@@ -286,11 +276,57 @@ export default function PipelinePage() {
   const [showAdd,    setShowAdd]    = useState(false)
   const [detailLead, setDetailLead] = useState<Lead | null>(null)
 
+  useEffect(() => {
+    async function fetchLeads() {
+      try {
+        const supabase = createClient()
+        const { data, error } = await supabase
+          .from("leads")
+          .select("*, agents!leads_assigned_agent_id_fkey(name)")
+          .order("created_at", { ascending: false })
+
+        if (error) throw error
+
+        const cols: Column[] = EMPTY_COLUMNS.map(c => ({ ...c, leads: [] }))
+
+        for (const row of data ?? []) {
+          const colId = STATUS_TO_COLUMN[row.status] ?? "new_lead"
+          const col = cols.find(c => c.id === colId)
+          if (!col) continue
+
+          const agentName = (row.agents as { name?: string } | null)?.name ?? "—"
+          const dealValue = row.deal_value ? `€${Math.round(row.deal_value / 1000)}K` : undefined
+
+          col.leads.push({
+            id:           row.id,
+            company:      row.company_name ?? "—",
+            contact:      row.contact_name ?? "—",
+            role:         row.contact_role ?? "—",
+            score:        row.icp_score ?? 0,
+            agent:        agentName.charAt(0).toUpperCase() + agentName.slice(1),
+            agentInitials: getInitials(agentName),
+            lastAction:   row.last_action ?? "—",
+            timestamp:    row.created_at ? timeAgo(row.created_at) : "—",
+            deal:         dealValue,
+            tags:         Array.isArray(row.tags) ? row.tags : [],
+          })
+        }
+
+        setColumns(cols)
+      } catch (err) {
+        console.error("Failed to fetch leads:", err)
+      } finally {
+        setLoading(false)
+      }
+    }
+    fetchLeads()
+  }, [])
+
   const totalLeads     = columns.reduce((s, c) => s + c.leads.length, 0)
   const converted      = columns.find(c => c.id === "converted")?.leads ?? []
   const convertedCount = converted.length
-  const convRate       = Math.round((convertedCount / totalLeads) * 100)
-  const pipelineValue  = converted.reduce((s, l) => s + (l.deal ? parseInt(l.deal.replace(/[^\d]/g,"")) : 0), 0)
+  const convRate       = totalLeads > 0 ? Math.round((convertedCount / totalLeads) * 100) : 0
+  const pipelineValue  = converted.reduce((s, l) => s + (l.deal ? parseInt(l.deal.replace(/[^\d]/g,"")) * 1000 : 0), 0)
 
   function handleDrop(targetColId: ColumnId) {
     if (!dragId) return
@@ -314,6 +350,15 @@ export default function PipelinePage() {
     ...c,
     leads: search ? c.leads.filter(l => l.company.toLowerCase().includes(searchLower) || l.contact.toLowerCase().includes(searchLower)) : c.leads,
   }))
+
+  if (loading) {
+    return (
+      <div className="flex flex-col items-center justify-center py-20 gap-3">
+        <Loader2 size={32} className="text-blue-400 animate-spin" />
+        <p className="text-sm text-slate-500">Chargement du pipeline...</p>
+      </div>
+    )
+  }
 
   return (
     <div className="flex flex-col gap-5">
