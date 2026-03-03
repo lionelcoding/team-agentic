@@ -224,7 +224,7 @@ export function AgentConsumptionTable() {
                 </TableCell>
                 <TableCell className="text-right py-2.5">
                   <span className="text-xs font-semibold text-slate-200 tabular-nums">
-                    \u20AC{agent.costDay.toFixed(2)}
+                    €{agent.costDay.toFixed(2)}
                   </span>
                 </TableCell>
                 <TableCell className="text-right py-2.5">
