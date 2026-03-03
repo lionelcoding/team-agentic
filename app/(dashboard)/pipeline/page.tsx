@@ -282,7 +282,7 @@ export default function PipelinePage() {
         const supabase = createClient()
         const { data, error } = await supabase
           .from("leads")
-          .select("*, agents!leads_assigned_agent_id_fkey(name)")
+          .select("*, agents!leads_assigned_agent_fkey(name)")
           .order("created_at", { ascending: false })
 
         if (error) throw error
