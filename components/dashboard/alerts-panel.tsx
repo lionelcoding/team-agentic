@@ -80,11 +80,26 @@ export function AlertsPanel() {
           .select('*')
           .order('created_at', { ascending: false })
         if (error) throw error
+        const SEVERITY_MAP: Record<string, Severity> = {
+          critical: 'CRITICAL',
+          warning: 'HIGH',
+          info: 'MEDIUM',
+          low: 'LOW',
+          high: 'HIGH',
+          medium: 'MEDIUM',
+        }
+        const CATEGORY_LABELS: Record<string, string> = {
+          rate_limit: 'Limite API',
+          performance: 'Performance',
+          system: 'Système',
+          churn: 'Risque Churn',
+          budget: 'Budget',
+        }
         const mapped: Alert[] = (data || []).map((a: any) => ({
           id: a.id,
-          severity: (a.severity || 'medium').toUpperCase() as Severity,
-          title: a.title || 'Alerte',
-          desc: a.description || '',
+          severity: SEVERITY_MAP[a.severity?.toLowerCase()] || 'MEDIUM',
+          title: CATEGORY_LABELS[a.category] || a.category || 'Alerte',
+          desc: a.message || '',
           time: a.created_at ? timeAgo(a.created_at) : '',
           acknowledged: a.acknowledged || false,
         }))
@@ -188,6 +203,7 @@ export function AlertsPanel() {
         ) : (
           filtered.map((alert) => {
             const cfg = severityConfig[alert.severity]
+            if (!cfg) return null
             const Icon = cfg.icon
             return (
               <div
