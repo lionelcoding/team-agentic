@@ -1,6 +1,5 @@
 'use client'
 
-import { useState } from 'react'
 import Link from 'next/link'
 import { usePathname } from 'next/navigation'
 import { cn } from '@/lib/utils'
@@ -15,11 +14,6 @@ import {
   DollarSign,
   Settings,
   Zap,
-  ChevronDown,
-  ChevronRight,
-  BookOpen,
-  Target,
-  Send,
 } from 'lucide-react'
 
 interface NavItem {
@@ -28,7 +22,6 @@ interface NavItem {
   href: string
   badge?: number
   badgeColor?: 'blue' | 'red'
-  children?: { label: string; icon: React.ElementType; href: string }[]
 }
 
 const navItems: NavItem[] = [
@@ -41,11 +34,6 @@ const navItems: NavItem[] = [
     href: '/signal',
     badge: 3,
     badgeColor: 'blue',
-    children: [
-      { label: 'Knowledge', icon: BookOpen, href: '/signal/knowledge' },
-      { label: 'Strategy', icon: Target, href: '/signal/strategy' },
-      { label: 'Outbound', icon: Send, href: '/signal/outbound' },
-    ],
   },
   {
     label: 'Handover',
@@ -56,8 +44,8 @@ const navItems: NavItem[] = [
   },
   { label: 'Analytics', icon: BarChart3, href: '/analytics' },
   { label: 'Rewards', icon: Trophy, href: '/rewards' },
-  { label: 'CoÃ»ts', icon: DollarSign, href: '/costs' },
-  { label: 'ParamÃ¨tres', icon: Settings, href: '/settings' },
+  { label: 'Co\u00fbts', icon: DollarSign, href: '/costs' },
+  { label: 'Param\u00e8tres', icon: Settings, href: '/settings' },
 ]
 
 interface SidebarProps {
@@ -67,13 +55,6 @@ interface SidebarProps {
 
 export function Sidebar({ collapsed, onToggle }: SidebarProps) {
   const pathname = usePathname()
-  const [openSubmenus, setOpenSubmenus] = useState<Record<string, boolean>>({
-    '/signal': true,
-  })
-
-  const toggleSubmenu = (href: string) => {
-    setOpenSubmenus((prev) => ({ ...prev, [href]: !prev[href] }))
-  }
 
   const isActive = (href: string) => {
     if (href === '/dashboard') return pathname === '/dashboard' || pathname === '/'
@@ -94,7 +75,7 @@ export function Sidebar({ collapsed, onToggle }: SidebarProps) {
           collapsed && 'justify-center px-0'
         )}
         onClick={onToggle}
-        title={collapsed ? 'DÃ©velopper la sidebar' : 'RÃ©duire la sidebar'}
+        title={collapsed ? 'D\u00e9velopper la sidebar' : 'R\u00e9duire la sidebar'}
       >
         <div className="flex items-center justify-center w-8 h-8 rounded-lg bg-blue-600 shrink-0">
           <Zap className="w-4 h-4 text-white" />
@@ -113,56 +94,33 @@ export function Sidebar({ collapsed, onToggle }: SidebarProps) {
       <nav className="flex-1 overflow-y-auto overflow-x-hidden py-3 px-2 space-y-0.5">
         {navItems.map((item) => {
           const active = isActive(item.href)
-          const hasChildren = !!item.children
-          const isOpen = openSubmenus[item.href]
 
           return (
-            <div key={item.href}>
-              {hasChildren ? (
-                <Link
-                  href={item.href}
-                  onClick={() => toggleSubmenu(item.href)}
-                  className={cn(
-                    'w-full flex items-center gap-3 px-3 py-2 rounded-md text-sm font-medium transition-all duration-150 group relative',
-                    active
-                      ? 'bg-blue-600/15 text-blue-400 border-l-2 border-blue-500 pl-[10px]'
-                      : 'text-slate-400 hover:bg-slate-800 hover:text-slate-200 border-l-2 border-transparent',
-                    collapsed && 'justify-center px-0 border-l-0'
-                  )}
-                  title={collapsed ? item.label : undefined}
-                >
-                  <item.icon
-                    className={cn(
-                      'w-4 h-4 shrink-0',
-                      active ? 'text-blue-400' : 'text-slate-500 group-hover:text-slate-300'
-                    )}
-                  />
-                  {!collapsed && (
-                    <>
-                      <span className="flex-1 text-left truncate">{item.label}</span>
-                      {item.badge && (
-                        <span
-                          className={cn(
-                            'inline-flex items-center justify-center w-4 h-4 text-[10px] font-bold rounded-full',
-                            item.badgeColor === 'red'
-                              ? 'bg-red-500 text-white'
-                              : 'bg-blue-600 text-white'
-                          )}
-                        >
-                          {item.badge}
-                        </span>
-                      )}
-                      {isOpen ? (
-                        <ChevronDown className="w-3.5 h-3.5 text-slate-500 ml-1 shrink-0" />
-                      ) : (
-                        <ChevronRight className="w-3.5 h-3.5 text-slate-500 ml-1 shrink-0" />
-                      )}
-                    </>
-                  )}
-                  {collapsed && item.badge && (
+            <Link
+              key={item.href}
+              href={item.href}
+              className={cn(
+                'flex items-center gap-3 px-3 py-2 rounded-md text-sm font-medium transition-all duration-150 group relative',
+                active
+                  ? 'bg-blue-600/15 text-blue-400 border-l-2 border-blue-500 pl-[10px]'
+                  : 'text-slate-400 hover:bg-slate-800 hover:text-slate-200 border-l-2 border-transparent',
+                collapsed && 'justify-center px-0 border-l-0'
+              )}
+              title={collapsed ? item.label : undefined}
+            >
+              <item.icon
+                className={cn(
+                  'w-4 h-4 shrink-0',
+                  active ? 'text-blue-400' : 'text-slate-500 group-hover:text-slate-300'
+                )}
+              />
+              {!collapsed && (
+                <>
+                  <span className="flex-1 truncate">{item.label}</span>
+                  {item.badge && (
                     <span
                       className={cn(
-                        'absolute top-1 right-1 inline-flex items-center justify-center w-3.5 h-3.5 text-[9px] font-bold rounded-full',
+                        'inline-flex items-center justify-center w-4 h-4 text-[10px] font-bold rounded-full',
                         item.badgeColor === 'red'
                           ? 'bg-red-500 text-white'
                           : 'bg-blue-600 text-white'
@@ -171,81 +129,21 @@ export function Sidebar({ collapsed, onToggle }: SidebarProps) {
                       {item.badge}
                     </span>
                   )}
-                </Link>
-              ) : (
-                <Link
-                  href={item.href}
+                </>
+              )}
+              {collapsed && item.badge && (
+                <span
                   className={cn(
-                    'flex items-center gap-3 px-3 py-2 rounded-md text-sm font-medium transition-all duration-150 group relative',
-                    active
-                      ? 'bg-blue-600/15 text-blue-400 border-l-2 border-blue-500 pl-[10px]'
-                      : 'text-slate-400 hover:bg-slate-800 hover:text-slate-200 border-l-2 border-transparent',
-                    collapsed && 'justify-center px-0 border-l-0'
+                    'absolute top-1 right-1 inline-flex items-center justify-center w-3.5 h-3.5 text-[9px] font-bold rounded-full',
+                    item.badgeColor === 'red'
+                      ? 'bg-red-500 text-white'
+                      : 'bg-blue-600 text-white'
                   )}
-                  title={collapsed ? item.label : undefined}
                 >
-                  <item.icon
-                    className={cn(
-                      'w-4 h-4 shrink-0',
-                      active ? 'text-blue-400' : 'text-slate-500 group-hover:text-slate-300'
-                    )}
-                  />
-                  {!collapsed && (
-                    <>
-                      <span className="flex-1 truncate">{item.label}</span>
-                      {item.badge && (
-                        <span
-                          className={cn(
-                            'inline-flex items-center justify-center w-4 h-4 text-[10px] font-bold rounded-full',
-                            item.badgeColor === 'red'
-                              ? 'bg-red-500 text-white'
-                              : 'bg-blue-600 text-white'
-                          )}
-                        >
-                          {item.badge}
-                        </span>
-                      )}
-                    </>
-                  )}
-                  {collapsed && item.badge && (
-                    <span
-                      className={cn(
-                        'absolute top-1 right-1 inline-flex items-center justify-center w-3.5 h-3.5 text-[9px] font-bold rounded-full',
-                        item.badgeColor === 'red'
-                          ? 'bg-red-500 text-white'
-                          : 'bg-blue-600 text-white'
-                      )}
-                    >
-                      {item.badge}
-                    </span>
-                  )}
-                </Link>
+                  {item.badge}
+                </span>
               )}
-
-              {/* Submenu */}
-              {hasChildren && isOpen && !collapsed && (
-                <div className="mt-0.5 ml-7 space-y-0.5 border-l border-slate-800 pl-3">
-                  {item.children!.map((child) => {
-                    const childActive = pathname === child.href
-                    return (
-                      <Link
-                        key={child.href}
-                        href={child.href}
-                        className={cn(
-                          'flex items-center gap-2.5 px-2.5 py-1.5 rounded-md text-xs font-medium transition-all duration-150 group',
-                          childActive
-                            ? 'text-blue-400 bg-blue-600/10'
-                            : 'text-slate-500 hover:text-slate-300 hover:bg-slate-800/60'
-                        )}
-                      >
-                        <child.icon className={cn('w-3.5 h-3.5 shrink-0', childActive ? 'text-blue-400' : 'text-slate-600 group-hover:text-slate-400')} />
-                        <span className="truncate">{child.label}</span>
-                      </Link>
-                    )
-                  })}
-                </div>
-              )}
-            </div>
+            </Link>
           )
         })}
       </nav>
@@ -273,3 +171,4 @@ export function Sidebar({ collapsed, onToggle }: SidebarProps) {
     </aside>
   )
 }
+
