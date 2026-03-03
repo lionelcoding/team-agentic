@@ -74,12 +74,12 @@ function XpBadge({ xp }: { xp: number }) {
 }
 
 const POLE_MAP: Record<string, string> = {
+  management: 'Core',
+  signal: 'Acquisition',
   acquisition: 'Acquisition',
-  activation: 'Activation',
-  retention: 'Retention',
-  referral: 'Referral',
-  revenue: 'Revenue',
-  core: 'Core',
+  growth: 'Activation',
+  ops: 'Retention',
+  infra: 'Revenue',
 }
 
 export function AgentConsumptionTable() {
@@ -93,7 +93,7 @@ export function AgentConsumptionTable() {
         const { data, error } = await supabase
           .from('agents')
           .select('*, gamification_profiles(*)')
-          .eq('status', 'active')
+          .neq('status', 'disabled')
           .order('name')
         if (error) throw error
 
