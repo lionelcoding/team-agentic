@@ -1,13 +1,14 @@
 'use client'
 
-import { useState } from 'react'
-import { AlertTriangle, AlertCircle, Info, CheckCircle2, X } from 'lucide-react'
+import { useState, useEffect } from 'react'
+import { AlertTriangle, AlertCircle, Info, CheckCircle2, X, Loader2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { createClient } from '@/lib/supabase/client'
 
 type Severity = 'CRITICAL' | 'HIGH' | 'MEDIUM' | 'LOW'
 
 interface Alert {
-  id: number
+  id: string
   severity: Severity
   title: string
   desc: string
@@ -50,86 +51,66 @@ const severityConfig: Record<Severity, { label: string; icon: React.ElementType;
   },
 }
 
-const initialAlerts: Alert[] = [
-  {
-    id: 1,
-    severity: 'CRITICAL',
-    title: 'Budget mensuel à 62%',
-    desc: 'Projection fin de mois : €478 sur budget €500. Risque dépassement dans 4 jours.',
-    time: 'il y a 5 min',
-    acknowledged: false,
-  },
-  {
-    id: 2,
-    severity: 'CRITICAL',
-    title: 'Taux bounce email +8%',
-    desc: 'Agent Perso Seq : domaine client-corp.fr blacklisté. 23 emails non délivrés.',
-    time: 'il y a 22 min',
-    acknowledged: false,
-  },
-  {
-    id: 3,
-    severity: 'HIGH',
-    title: 'Pipeline Stage 3 bloqué',
-    desc: '7 prospects en Proposition depuis +14 jours sans activité. Relance nécessaire.',
-    time: 'il y a 1h 15',
-    acknowledged: false,
-  },
-  {
-    id: 4,
-    severity: 'HIGH',
-    title: 'API Clearbit dégradée',
-    desc: 'Latence x3 (1200ms avg). Enrichissement ralenti pour 34 leads en file.',
-    time: 'il y a 2h 08',
-    acknowledged: false,
-  },
-  {
-    id: 5,
-    severity: 'MEDIUM',
-    title: 'Taux réussite Perso Seq',
-    desc: 'Agent en dessous de 90% — 3 emails rejetés par filtres spam ce matin.',
-    time: 'il y a 3h 40',
-    acknowledged: false,
-  },
-  {
-    id: 6,
-    severity: 'MEDIUM',
-    title: 'Segment ICP obsolète',
-    desc: 'Segment "PME Industrie" non mis à jour depuis 21 jours. Révision recommandée.',
-    time: 'il y a 5h 20',
-    acknowledged: false,
-  },
-  {
-    id: 7,
-    severity: 'LOW',
-    title: 'Rapport hebdo disponible',
-    desc: 'Synthèse des performances AARRR générée par Victor. 16 pages, 42 KPIs.',
-    time: 'il y a 2h 20',
-    acknowledged: false,
-  },
-  {
-    id: 8,
-    severity: 'LOW',
-    title: 'Mise à jour modèle disponible',
-    desc: 'Claude 3.7 Sonnet disponible. Amélioration ~12% sur tâches de personnalisation.',
-    time: 'il y a 6h 00',
-    acknowledged: false,
-  },
-]
+function timeAgo(dateStr: string): string {
+  const now = new Date()
+  const date = new Date(dateStr)
+  const diffMs = now.getTime() - date.getTime()
+  const diffMin = Math.floor(diffMs / 60000)
+  if (diffMin < 1) return "à l'instant"
+  if (diffMin < 60) return `il y a ${diffMin} min`
+  const diffH = Math.floor(diffMin / 60)
+  if (diffH < 24) return `il y a ${diffH}h ${String(diffMin % 60).padStart(2, '0')}`
+  const diffD = Math.floor(diffH / 24)
+  return `il y a ${diffD}j`
+}
 
 const severityOrder: Severity[] = ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW']
 
 export function AlertsPanel() {
-  const [alerts, setAlerts] = useState<Alert[]>(initialAlerts)
+  const [alerts, setAlerts] = useState<Alert[]>([])
+  const [loading, setLoading] = useState(true)
   const [filter, setFilter] = useState<Severity | 'ALL'>('ALL')
 
-  const acknowledge = (id: number) => {
+  useEffect(() => {
+    async function fetchAlerts() {
+      try {
+        const supabase = createClient()
+        const { data, error } = await supabase
+          .from('alerts')
+          .select('*')
+          .order('created_at', { ascending: false })
+        if (error) throw error
+        const mapped: Alert[] = (data || []).map((a: any) => ({
+          id: a.id,
+          severity: (a.severity || 'medium').toUpperCase() as Severity,
+          title: a.title || 'Alerte',
+          desc: a.description || '',
+          time: a.created_at ? timeAgo(a.created_at) : '',
+          acknowledged: a.acknowledged || false,
+        }))
+        setAlerts(mapped)
+      } catch (err) {
+        console.error('Failed to fetch alerts:', err)
+      } finally {
+        setLoading(false)
+      }
+    }
+    fetchAlerts()
+  }, [])
+
+  const acknowledge = async (id: string) => {
     setAlerts((prev) =>
       prev.map((a) => (a.id === id ? { ...a, acknowledged: true } : a))
     )
+    try {
+      const supabase = createClient()
+      await supabase.from('alerts').update({ acknowledged: true }).eq('id', id)
+    } catch (err) {
+      console.error('Failed to acknowledge alert:', err)
+    }
   }
 
-  const dismiss = (id: number) => {
+  const dismiss = (id: string) => {
     setAlerts((prev) => prev.filter((a) => a.id !== id))
   }
 
@@ -144,6 +125,15 @@ export function AlertsPanel() {
     },
     {} as Record<Severity, number>
   )
+
+  if (loading) {
+    return (
+      <div className="bg-slate-900 border border-slate-800 rounded-lg flex flex-col items-center justify-center py-16">
+        <Loader2 size={24} className="text-red-400 animate-spin" />
+        <p className="text-xs text-slate-500 mt-2">Chargement des alertes...</p>
+      </div>
+    )
+  }
 
   return (
     <div className="bg-slate-900 border border-slate-800 rounded-lg flex flex-col">
