@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import {
   Table,
   TableBody,
@@ -30,10 +30,17 @@ const avatarColors = [
   'from-yellow-500 to-orange-600',
   'from-cyan-500 to-blue-600',
   'from-rose-500 to-pink-600',
-  'from-violet-500 to-purple-600',
+  'from-indigo-500 to-violet-600',
 ]
 
+const statusConfig: Record<string, { color: string; label: string; pulse: boolean }> = {
+  idle: { color: 'bg-emerald-400', label: 'Disponible', pulse: false },
+  working: { color: 'bg-yellow-400', label: 'En cours', pulse: true },
+  error: { color: 'bg-red-400', label: 'Erreur', pulse: true },
+}
+
 interface AgentRow {
+  id: string
   initials: string
   name: string
   role: string
@@ -43,15 +50,16 @@ interface AgentRow {
   tokensDay: string
   costDay: number
   xp: number
+  status: string
 }
 
 function SuccessBar({ value }: { value: number }) {
   return (
     <div className="flex items-center gap-2">
-      <div className="w-16 bg-slate-800 rounded-full h-1.5 overflow-hidden">
+      <div className="h-1.5 w-16 bg-slate-800 rounded-full overflow-hidden">
         <div
           className={cn(
-            'h-1.5 rounded-full',
+            'h-full rounded-full transition-all',
             value >= 95 ? 'bg-emerald-500' : value >= 85 ? 'bg-yellow-500' : 'bg-red-500'
           )}
           style={{ width: `${value}%` }}
@@ -73,6 +81,18 @@ function XpBadge({ xp }: { xp: number }) {
   )
 }
 
+function StatusDot({ status }: { status: string }) {
+  const cfg = statusConfig[status] || statusConfig.idle
+  return (
+    <div className="relative flex items-center gap-1.5" title={cfg.label}>
+      <span className={cn('block w-2 h-2 rounded-full', cfg.color)} />
+      {cfg.pulse && (
+        <span className={cn('absolute w-2 h-2 rounded-full animate-ping opacity-75', cfg.color)} />
+      )}
+    </div>
+  )
+}
+
 const POLE_MAP: Record<string, string> = {
   management: 'Core',
   signal: 'Acquisition',
@@ -85,11 +105,13 @@ const POLE_MAP: Record<string, string> = {
 export function AgentConsumptionTable() {
   const [agents, setAgents] = useState<AgentRow[]>([])
   const [loading, setLoading] = useState(true)
+  const rawAgentsRef = useRef<any[]>([])
 
   useEffect(() => {
+    const supabase = createClient()
+
     async function fetchAgents() {
       try {
-        const supabase = createClient()
         const { data, error } = await supabase
           .from('agents')
           .select('*, gamification_profiles(*)')
@@ -97,21 +119,8 @@ export function AgentConsumptionTable() {
           .order('name')
         if (error) throw error
 
-        const mapped: AgentRow[] = (data || []).map((a: any) => {
-          const gp = Array.isArray(a.gamification_profiles) ? a.gamification_profiles[0] : a.gamification_profiles
-          return {
-            initials: a.avatar_initials || a.name?.substring(0, 2).toUpperCase() || '??',
-            name: a.name || 'Agent',
-            role: a.role || '',
-            pole: POLE_MAP[a.pole?.toLowerCase()] || a.pole || 'Core',
-            tasks: gp?.streak_days ? gp.streak_days * 8 : Math.floor(Math.random() * 150 + 30),
-            successRate: 85 + Math.random() * 14,
-            tokensDay: `${Math.floor(Math.random() * 200 + 30)}K`,
-            costDay: Math.round((Math.random() * 5 + 0.5) * 100) / 100,
-            xp: gp?.xp_total || 0,
-          }
-        })
-        setAgents(mapped)
+        rawAgentsRef.current = data || []
+        setAgents(mapAgents(data || []))
       } catch (err) {
         console.error('Failed to fetch agents:', err)
       } finally {
@@ -119,6 +128,25 @@ export function AgentConsumptionTable() {
       }
     }
     fetchAgents()
+
+    // Realtime subscription
+    const channel = supabase
+      .channel('agents-realtime')
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'agents' },
+        (payload) => {
+          rawAgentsRef.current = rawAgentsRef.current.map((a) =>
+            a.id === (payload.new as any)?.id ? { ...a, ...(payload.new as any) } : a
+          )
+          setAgents(mapAgents(rawAgentsRef.current))
+        }
+      )
+      .subscribe()
+
+    return () => {
+      supabase.removeChannel(channel)
+    }
   }, [])
 
   if (loading) {
@@ -133,29 +161,33 @@ export function AgentConsumptionTable() {
   return (
     <div className="bg-slate-900 border border-slate-800 rounded-lg overflow-hidden">
       <div className="px-4 py-3 border-b border-slate-800 flex items-center justify-between">
-        <h3 className="text-sm font-semibold text-slate-200">Consommation des Agents</h3>
-        <span className="text-xs text-slate-500">{agents.length} agents actifs aujourd'hui</span>
+        <div className="flex items-center gap-2">
+          <h3 className="text-sm font-semibold text-slate-200">Consommation des Agents</h3>
+          <span className="flex items-center gap-1 text-[10px] text-emerald-400 font-medium bg-emerald-500/10 px-1.5 py-0.5 rounded-full border border-emerald-500/20">
+            <span className="block w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+            Live
+          </span>
+        </div>
+        <span className="text-xs text-slate-500">{agents.length} agents actifs aujourd&apos;hui</span>
       </div>
       <div className="overflow-x-auto">
         <Table>
           <TableHeader>
             <TableRow className="border-slate-800 hover:bg-transparent">
               <TableHead className="text-slate-500 text-xs font-medium w-56">Agent</TableHead>
+              <TableHead className="text-slate-500 text-xs font-medium w-10">État</TableHead>
               <TableHead className="text-slate-500 text-xs font-medium text-right">Tâches</TableHead>
-              <TableHead className="text-slate-500 text-xs font-medium">Taux réussite</TableHead>
-              <TableHead className="text-slate-500 text-xs font-medium text-right">Tokens / jour</TableHead>
-              <TableHead className="text-slate-500 text-xs font-medium text-right">Coût €</TableHead>
+              <TableHead className="text-slate-500 text-xs font-medium">Succès</TableHead>
+              <TableHead className="text-slate-500 text-xs font-medium text-right">Tokens/j</TableHead>
+              <TableHead className="text-slate-500 text-xs font-medium text-right">Coût/j</TableHead>
               <TableHead className="text-slate-500 text-xs font-medium text-right">XP</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
             {agents.map((agent, i) => (
-              <TableRow
-                key={agent.name}
-                className="border-slate-800 hover:bg-slate-800/40 transition-colors"
-              >
+              <TableRow key={agent.id} className="border-slate-800/50 hover:bg-slate-800/30 transition-colors">
                 <TableCell className="py-2.5">
-                  <div className="flex items-center gap-2.5">
+                  <div className="flex items-center gap-2">
                     <div
                       className={cn(
                         'w-7 h-7 rounded-full bg-gradient-to-br flex items-center justify-center text-[11px] font-bold text-white shrink-0',
@@ -178,6 +210,9 @@ export function AgentConsumptionTable() {
                     </span>
                   </div>
                 </TableCell>
+                <TableCell className="py-2.5">
+                  <StatusDot status={agent.status} />
+                </TableCell>
                 <TableCell className="text-right py-2.5">
                   <span className="text-xs font-semibold text-slate-200 tabular-nums">{agent.tasks}</span>
                 </TableCell>
@@ -189,7 +224,7 @@ export function AgentConsumptionTable() {
                 </TableCell>
                 <TableCell className="text-right py-2.5">
                   <span className="text-xs font-semibold text-slate-200 tabular-nums">
-                    €{agent.costDay.toFixed(2)}
+                    \u20AC{agent.costDay.toFixed(2)}
                   </span>
                 </TableCell>
                 <TableCell className="text-right py-2.5">
@@ -202,4 +237,23 @@ export function AgentConsumptionTable() {
       </div>
     </div>
   )
+}
+
+function mapAgents(data: any[]): AgentRow[] {
+  return data.map((a: any) => {
+    const gp = Array.isArray(a.gamification_profiles) ? a.gamification_profiles[0] : a.gamification_profiles
+    return {
+      id: a.id,
+      initials: a.avatar_initials || a.name?.substring(0, 2).toUpperCase() || '??',
+      name: a.name || 'Agent',
+      role: a.role || '',
+      pole: POLE_MAP[a.pole?.toLowerCase()] || a.pole || 'Core',
+      tasks: gp?.streak_days ? gp.streak_days * 8 : Math.floor(Math.random() * 150 + 30),
+      successRate: 85 + Math.random() * 14,
+      tokensDay: `${Math.floor(Math.random() * 200 + 30)}K`,
+      costDay: Math.round((Math.random() * 5 + 0.5) * 100) / 100,
+      xp: gp?.xp_total || 0,
+      status: a.status || 'idle',
+    }
+  })
 }
