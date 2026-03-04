@@ -1,5 +1,5 @@
 import { createClient } from './client'
-import type { Agent, Pole, AgentStatus, AarrrPhase, AgentAction, AgentMemoryEntry, Badge } from '@/lib/agents-data'
+import type { Agent, Pole, AgentStatus, AarrrPhase, AgentMemoryEntry, Persona } from '@/lib/agents-data'
 import type { SignalItem, SignalSource, SignalImpact, SignalStatus, SignalTab } from '@/lib/signal-data'
 
 // ============================================================
@@ -138,22 +138,30 @@ function mapDbAgentToFrontend(row: any): Agent {
     id: row.id,
     name: row.name,
     role: row.role || '',
-    pole: POLE_MAP[row.pole] || 'OPS',
-    phase: PHASE_MAP[row.aarrr_phase] || 'Acquisition',
-    status: STATUS_MAP[row.status] || 'idle',
+    pole: row.pole ? (POLE_MAP[row.pole] || null) : null,
+    phase: row.aarrr_phase ? (PHASE_MAP[row.aarrr_phase] || null) : null,
+    status: (STATUS_MAP[row.status] || row.status || 'idle') as AgentStatus,
     enabled: row.enabled ?? true,
     description: row.description || '',
+    // PRD v3 fields
+    model: row.model || undefined,
+    workspacePath: row.workspace_path || undefined,
+    personas: (row.personas as Persona[]) || [],
+    tags: row.tags || [],
+    memorySizeTokens: row.memory_size_tokens || 0,
+    dailyNotesCount: row.daily_notes_count || 0,
+    // Legacy fields
     capabilities: row.capabilities || [],
     createdAt: row.created_at,
-    tasksActive: row.tasks_active || 0,
-    tasksTotal: row.tasks_total || 0,
+    tasksActive: row.tasks_active || row.tasks_count || 0,
+    tasksTotal: row.tasks_total || row.tasks_count || 0,
     failureRate: row.failure_rate || 0,
     tokensDay: row.tokens_day || 0,
     costDay: row.cost_day || 0,
     level: gp.level || 1,
-    xp: gp.xp || 0,
+    xp: gp.xp || gp.xp_total || 0,
     xpNext: gp.xp_next || 100,
-    streak: gp.streak || 0,
+    streak: gp.streak || gp.streak_days || 0,
     actions: [],
     memory: memories,
     badges: [],
@@ -445,7 +453,7 @@ export async function getDashboardStats(): Promise<DashboardStats> {
     supabase.from('signal_items').select('*', { count: 'exact', head: true }),
     supabase.from('signal_items').select('subcategory'),
     supabase.from('agents').select('*', { count: 'exact', head: true }),
-    supabase.from('agents').select('*', { count: 'exact', head: true }).eq('status', 'active'),
+    supabase.from('agents').select('*', { count: 'exact', head: true }).eq('status', 'working'),
     supabase.from('cost_entries').select('amount').gte('date', new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0]),
     supabase.from('alerts').select('*', { count: 'exact', head: true }).eq('acknowledged', false),
     supabase.from('handover_messages').select('*', { count: 'exact', head: true }).eq('status', 'sent'),

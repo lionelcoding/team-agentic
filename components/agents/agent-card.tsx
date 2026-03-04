@@ -9,10 +9,13 @@ import { cn } from "@/lib/utils"
 import type { Agent } from "@/lib/agents-data"
 import { POLE_COLORS, PHASE_COLORS } from "@/lib/agents-data"
 
-const STATUS_CONFIG = {
+const STATUS_CONFIG: Record<string, { dot: string; label: string; pulse: boolean }> = {
   idle:    { dot: "bg-slate-500", label: "Inactif",   pulse: false },
   working: { dot: "bg-blue-400",  label: "En cours",  pulse: true  },
   error:   { dot: "bg-red-400",   label: "Erreur",    pulse: false },
+  disabled: { dot: "bg-slate-600", label: "Desactive", pulse: false },
+  provisioning: { dot: "bg-blue-400", label: "Provisioning", pulse: true },
+  deleting: { dot: "bg-red-600", label: "Suppression", pulse: true },
 }
 
 interface AgentCardProps {
@@ -22,8 +25,8 @@ interface AgentCardProps {
 }
 
 export function AgentCard({ agent, onView, onToggle }: AgentCardProps) {
-  const pole = POLE_COLORS[agent.pole]
-  const status = STATUS_CONFIG[agent.status]
+  const pole = agent.pole ? POLE_COLORS[agent.pole] : { bg: "bg-slate-500/15", text: "text-slate-400", border: "border-slate-500/30", avatar: "from-slate-500 to-slate-700" }
+  const status = STATUS_CONFIG[agent.status] || STATUS_CONFIG.idle
   const xpPct = Math.round((agent.xp / agent.xpNext) * 100)
 
   return (
@@ -73,12 +76,16 @@ export function AgentCard({ agent, onView, onToggle }: AgentCardProps) {
 
       {/* Badges row */}
       <div className="flex items-center gap-1.5 flex-wrap">
-        <span className={cn("text-[10px] font-semibold px-1.5 py-0.5 rounded border", pole.bg, pole.text, pole.border)}>
-          {agent.pole}
-        </span>
-        <span className={cn("text-[10px] font-medium px-1.5 py-0.5 rounded border", PHASE_COLORS[agent.phase])}>
-          {agent.phase}
-        </span>
+        {agent.pole && (
+          <span className={cn("text-[10px] font-semibold px-1.5 py-0.5 rounded border", pole.bg, pole.text, pole.border)}>
+            {agent.pole}
+          </span>
+        )}
+        {agent.phase && (
+          <span className={cn("text-[10px] font-medium px-1.5 py-0.5 rounded border", PHASE_COLORS[agent.phase])}>
+            {agent.phase}
+          </span>
+        )}
         <span className={cn(
           "text-[10px] font-medium px-1.5 py-0.5 rounded border ml-auto",
           agent.status === "error" ? "bg-red-500/15 text-red-400 border-red-500/30" :

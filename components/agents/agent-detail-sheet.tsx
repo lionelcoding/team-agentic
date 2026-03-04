@@ -45,7 +45,7 @@ export function AgentDetailSheet({ agent, onClose }: AgentDetailSheetProps) {
   const [openCategories, setOpenCategories] = useState<Set<string>>(new Set(MEMORY_CATEGORIES))
 
   if (!agent) return null
-  const pole = POLE_COLORS[agent.pole]
+  const pole = agent.pole ? POLE_COLORS[agent.pole] : { bg: "bg-slate-500/15", text: "text-slate-400", border: "border-slate-500/30", avatar: "from-slate-500 to-slate-700" }
   const xpPct = Math.round((agent.xp / agent.xpNext) * 100)
 
   const toggleCategory = (cat: string) => {
@@ -77,7 +77,7 @@ export function AgentDetailSheet({ agent, onClose }: AgentDetailSheetProps) {
             </div>
             <div>
               <p className="text-sm font-bold text-slate-50">{agent.name}</p>
-              <p className="text-xs text-slate-400">{agent.role} · {agent.pole}</p>
+              <p className="text-xs text-slate-400">{agent.role}{agent.pole ? ` · ${agent.pole}` : ''}</p>
             </div>
           </div>
           <Button variant="ghost" size="icon" onClick={onClose} className="w-8 h-8 text-slate-500 hover:text-slate-200 hover:bg-slate-800">
@@ -106,15 +106,19 @@ export function AgentDetailSheet({ agent, onClose }: AgentDetailSheetProps) {
           {activeTab === "Vue d'ensemble" && (
             <div className="flex flex-col gap-4">
               <div className="flex items-center gap-2 flex-wrap">
-                <span className={cn("text-xs font-semibold px-2 py-0.5 rounded border", pole.bg, pole.text, pole.border)}>{agent.pole}</span>
-                <span className={cn("text-xs font-medium px-2 py-0.5 rounded border", PHASE_COLORS[agent.phase])}>{agent.phase}</span>
+                {agent.pole && (
+                  <span className={cn("text-xs font-semibold px-2 py-0.5 rounded border", pole.bg, pole.text, pole.border)}>{agent.pole}</span>
+                )}
+                {agent.phase && (
+                  <span className={cn("text-xs font-medium px-2 py-0.5 rounded border", PHASE_COLORS[agent.phase])}>{agent.phase}</span>
+                )}
                 <span className="text-xs text-slate-500 ml-auto">Créé le {agent.createdAt}</span>
               </div>
               <p className="text-sm text-slate-300 leading-relaxed">{agent.description}</p>
               <div>
                 <p className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-2">Capacités</p>
                 <div className="flex flex-wrap gap-1.5">
-                  {agent.capabilities.map(cap => (
+                  {(agent.capabilities || []).map(cap => (
                     <span key={cap} className="text-xs px-2 py-1 rounded-md bg-slate-800 text-slate-300 border border-slate-700">{cap}</span>
                   ))}
                 </div>

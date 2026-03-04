@@ -35,7 +35,7 @@ export function AutonomyTab() {
     setAgents((prev) => prev.map((a) => a.id === id ? { ...a, level } : a))
   }
 
-  const totalAutonomousActions = AUTONOMY_LOGS.reduce((s, l) => s + l.autonomousActionsToday, 0)
+  const totalAutonomousActions = AUTONOMY_LOGS.length
   const totalCost               = AUTONOMY_LOGS.reduce((s, l) => s + l.cost, 0)
 
   return (

@@ -102,7 +102,7 @@ export function AgentOrgChart({ agents, onSelectAgent }: AgentOrgChartProps) {
 }
 
 function OrgNode({ agent, onSelect, compact = false }: { agent: Agent; onSelect: (a: Agent) => void; compact?: boolean }) {
-  const pole = POLE_COLORS[agent.pole]
+  const pole = agent.pole ? POLE_COLORS[agent.pole] : { bg: "bg-slate-500/15", text: "text-slate-400", border: "border-slate-500/30", avatar: "from-slate-500 to-slate-700" }
   return (
     <button
       onClick={() => onSelect(agent)}
