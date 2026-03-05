@@ -6,7 +6,7 @@ import Link from "next/link"
 import {
   ArrowLeft, Bot, Power, PowerOff, RotateCcw, Loader2,
   FileText, Clock, Play, ToggleLeft, ToggleRight,
-  Save, Terminal, Tag, Brain, Hash, AlertCircle, CheckCircle2,
+  Save, Terminal, Tag, Brain, Hash, AlertCircle, CheckCircle2, Activity,
 } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { createClient } from "@/lib/supabase/client"
@@ -69,7 +69,7 @@ const statusConfig: Record<string, { color: string; label: string; pulse: boolea
   deleting: { color: "bg-red-600", label: "Suppression", pulse: true },
 }
 
-type Tab = "overview" | "files" | "crons"
+type Tab = "overview" | "files" | "crons" | "activity"
 
 // ---------------------------------------------------------------------------
 // Command button (reused from agents page)
@@ -194,6 +194,7 @@ export default function AgentDetailPage() {
           { id: "overview" as Tab, label: "Vue d'ensemble", icon: Bot },
           { id: "files" as Tab, label: "Fichiers", icon: FileText },
           { id: "crons" as Tab, label: "Crons", icon: Clock },
+          { id: "activity" as Tab, label: "Activite", icon: Activity },
         ]).map((t) => (
           <button
             key={t.id}
@@ -215,6 +216,7 @@ export default function AgentDetailPage() {
       {tab === "overview" && <OverviewTab agent={agent} />}
       {tab === "files" && <FilesTab agentId={agentId} />}
       {tab === "crons" && <CronsTab agentId={agentId} />}
+      {tab === "activity" && <ActivityTab agentId={agentId} />}
     </div>
   )
 }
@@ -637,6 +639,133 @@ function CronsTab({ agentId }: { agentId: string }) {
           ))}
         </tbody>
       </table>
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Activity Tab
+// ---------------------------------------------------------------------------
+const ACTION_TYPE_COLORS: Record<string, string> = {
+  toolCall: "bg-blue-500/15 text-blue-400 border-blue-500/30",
+  agent_end: "bg-emerald-500/15 text-emerald-400 border-emerald-500/30",
+  session_end: "bg-purple-500/15 text-purple-400 border-purple-500/30",
+  heartbeat: "bg-yellow-500/15 text-yellow-400 border-yellow-500/30",
+  error: "bg-red-500/15 text-red-400 border-red-500/30",
+  wake: "bg-cyan-500/15 text-cyan-400 border-cyan-500/30",
+  sleep: "bg-slate-500/15 text-slate-400 border-slate-500/30",
+}
+
+function formatTokens(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`
+  return String(n)
+}
+
+function timeAgo(dateStr: string): string {
+  const diff = Date.now() - new Date(dateStr).getTime()
+  const mins = Math.floor(diff / 60_000)
+  if (mins < 1) return "a l'instant"
+  if (mins < 60) return `il y a ${mins} min`
+  const hours = Math.floor(mins / 60)
+  if (hours < 24) return `il y a ${hours}h`
+  const days = Math.floor(hours / 24)
+  return `il y a ${days}j`
+}
+
+interface AgentAction {
+  id: string
+  agent_id: string
+  action_type: string
+  description: string | null
+  result: string | null
+  tokens_used: number
+  cost: number
+  model_used: string | null
+  created_at: string
+}
+
+function ActivityTab({ agentId }: { agentId: string }) {
+  const [actions, setActions] = useState<AgentAction[]>([])
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => {
+    const supabase = createClient()
+    async function fetch() {
+      const { data, error } = await supabase
+        .from("agent_actions")
+        .select("id, agent_id, action_type, description, result, tokens_used, cost, model_used, created_at")
+        .eq("agent_id", agentId)
+        .order("created_at", { ascending: false })
+        .limit(50)
+      if (error) console.error("Error fetching actions:", error)
+      setActions(data || [])
+      setLoading(false)
+    }
+    fetch()
+  }, [agentId])
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center py-16">
+        <Loader2 className="w-5 h-5 text-blue-400 animate-spin" />
+        <span className="ml-2 text-sm text-slate-400">Chargement de l'activite...</span>
+      </div>
+    )
+  }
+
+  if (actions.length === 0) {
+    return (
+      <div className="text-center py-16">
+        <Activity className="w-10 h-10 text-slate-600 mx-auto mb-3" />
+        <p className="text-slate-500 text-sm">Aucune activite enregistree</p>
+      </div>
+    )
+  }
+
+  return (
+    <div className="bg-slate-800/50 border border-slate-700/50 rounded-xl overflow-hidden">
+      <div className="px-4 py-3 border-b border-slate-700/50 flex items-center justify-between">
+        <h3 className="text-sm font-semibold text-slate-200">Dernieres actions</h3>
+        <span className="text-xs text-slate-500">{actions.length} actions</span>
+      </div>
+      <div className="overflow-y-auto max-h-[500px] divide-y divide-slate-700/30">
+        {actions.map((a) => (
+          <div key={a.id} className="flex items-start gap-3 px-4 py-3 hover:bg-slate-700/20 transition-colors">
+            <div className="flex-1 min-w-0">
+              <div className="flex items-center gap-2 mb-1 flex-wrap">
+                <span className={cn(
+                  "text-[10px] font-medium px-1.5 py-0.5 rounded border",
+                  ACTION_TYPE_COLORS[a.action_type] || "bg-slate-700 text-slate-400 border-slate-600"
+                )}>
+                  {a.action_type}
+                </span>
+                {a.model_used && (
+                  <span className="text-[10px] text-slate-500 font-mono">
+                    {a.model_used.split("/").pop()}
+                  </span>
+                )}
+                {a.tokens_used > 0 && (
+                  <span className="text-[10px] text-slate-500 font-mono">
+                    {formatTokens(a.tokens_used)} tok
+                  </span>
+                )}
+                {a.cost > 0 && (
+                  <span className="text-[10px] text-emerald-400 font-mono">
+                    ${a.cost.toFixed(4)}
+                  </span>
+                )}
+              </div>
+              <p className="text-xs text-slate-400 leading-snug truncate">
+                {a.description || "—"}
+              </p>
+            </div>
+            <span className="text-[10px] text-slate-600 shrink-0 mt-0.5 whitespace-nowrap">
+              {timeAgo(a.created_at)}
+            </span>
+          </div>
+        ))}
+      </div>
     </div>
   )
 }
