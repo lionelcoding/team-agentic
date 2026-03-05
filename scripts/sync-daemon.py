@@ -908,23 +908,20 @@ class SyncDaemon:
 
             row = {
                 "id": det_id,
-                "name": cron.get("name", cron_id),
-                "description": cron.get("description"),
-                "cron_expression": schedule.get("expr", "") if isinstance(schedule, dict) else str(schedule),
                 "agent_id": agent_id,
-                "action_type": cron.get("action") or "cron_job",
+                "cron_expression": schedule.get("expr", "") if isinstance(schedule, dict) else str(schedule),
+                "time_label": cron.get("name", cron_id),
+                "period": schedule.get("kind") if isinstance(schedule, dict) else None,
+                "task_description": cron.get("description"),
+                "gateway_message": cron.get("gatewayMessage"),
+                "wake_mode": cron.get("wakeMode"),
+                "deliver_telegram": cron.get("deliverTelegram", False),
                 "enabled": cron.get("enabled", True),
-                "payload": {"openclaw_cron_id": cron_id, "schedule": schedule, "state": state},
                 "last_run_at": (
                     datetime.fromtimestamp(state["lastRunAtMs"] / 1000, tz=timezone.utc).isoformat()
                     if state.get("lastRunAtMs") else None
                 ),
-                "last_run_status": state.get("lastRunStatus") or state.get("lastStatus"),
-                "next_run_at": (
-                    datetime.fromtimestamp(state["nextRunAtMs"] / 1000, tz=timezone.utc).isoformat()
-                    if state.get("nextRunAtMs") else None
-                ),
-                "updated_at": datetime.now(timezone.utc).isoformat(),
+                "last_result": state.get("lastRunStatus") or state.get("lastStatus"),
             }
 
             try:

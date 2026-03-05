@@ -450,20 +450,18 @@ function FilesTab({ agentId }: { agentId: string }) {
 // ---------------------------------------------------------------------------
 interface DbCronSchedule {
   id: string
-  name: string
-  description: string | null
-  cron_expression: string
   agent_id: string | null
-  action_type: string
-  payload: Record<string, unknown> | null
+  cron_expression: string | null
+  time_label: string | null
+  period: string | null
+  task_description: string | null
+  gateway_message: string | null
+  wake_mode: string | null
+  deliver_telegram: boolean
   enabled: boolean
   last_run_at: string | null
-  last_run_status: string | null
-  next_run_at: string | null
-  total_runs: number
-  failed_runs: number
+  last_result: string | null
   created_at: string
-  updated_at: string
 }
 
 interface CronFormData {
@@ -501,7 +499,7 @@ function CronsTab({ agentId }: { agentId: string }) {
         .from("cron_schedule")
         .select("*")
         .eq("agent_id", agentId)
-        .order("name")
+        .order("time_label")
       if (fetchErr) {
         setError(fetchErr.message)
       } else {
@@ -537,15 +535,9 @@ function CronsTab({ agentId }: { agentId: string }) {
     return () => { supabase.removeChannel(channel) }
   }, [agentId])
 
-  // Get the openclaw cron_id from payload
-  const getOpenClawId = (cron: DbCronSchedule): string => {
-    const p = cron.payload as Record<string, unknown> | null
-    return (p?.openclaw_cron_id as string) || cron.id
-  }
-
   // Run cron
   const runCron = useCallback(async (cron: DbCronSchedule) => {
-    const cronId = getOpenClawId(cron)
+    const cronId = cron.id
     setActionLoading((s) => ({ ...s, [cron.id]: true }))
     try {
       const res = await fetch("/api/crons", {
@@ -564,7 +556,7 @@ function CronsTab({ agentId }: { agentId: string }) {
 
   // Toggle cron
   const toggleCron = useCallback(async (cron: DbCronSchedule) => {
-    const cronId = getOpenClawId(cron)
+    const cronId = cron.id
     const key = `toggle-${cron.id}`
     setActionLoading((s) => ({ ...s, [key]: true }))
     try {
@@ -592,9 +584,9 @@ function CronsTab({ agentId }: { agentId: string }) {
   const openEdit = (cron: DbCronSchedule) => {
     setEditingCron(cron)
     setFormData({
-      name: cron.name,
-      schedule_expr: cron.cron_expression,
-      description: cron.description || "",
+      name: cron.time_label || "",
+      schedule_expr: cron.cron_expression || "",
+      description: cron.task_description || "",
     })
     setFormError(null)
     setModalOpen(true)
@@ -610,7 +602,7 @@ function CronsTab({ agentId }: { agentId: string }) {
     setFormError(null)
     try {
       if (editingCron) {
-        const cronId = getOpenClawId(editingCron)
+        const cronId = editingCron.id
         const res = await fetch("/api/crons", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -649,7 +641,7 @@ function CronsTab({ agentId }: { agentId: string }) {
     if (!deletingId) return
     const cron = crons.find((c) => c.id === deletingId)
     if (!cron) return
-    const cronId = getOpenClawId(cron)
+    const cronId = cron.id
     setDeleteLoading(true)
     try {
       const res = await fetch("/api/crons", {
@@ -720,17 +712,17 @@ function CronsTab({ agentId }: { agentId: string }) {
               {crons.map((cron) => (
                 <tr key={cron.id} className="border-b border-slate-700/30 last:border-b-0 hover:bg-slate-700/20 transition-colors">
                   <td className="px-4 py-3">
-                    <span className="text-white font-medium">{cron.name}</span>
-                    {cron.description && (
-                      <p className="text-[11px] text-slate-500 mt-0.5 truncate max-w-xs">{cron.description}</p>
+                    <span className="text-white font-medium">{cron.time_label || cron.id}</span>
+                    {cron.task_description && (
+                      <p className="text-[11px] text-slate-500 mt-0.5 truncate max-w-xs">{cron.task_description}</p>
                     )}
                   </td>
                   <td className="px-4 py-3 font-mono text-xs text-slate-400">{cron.cron_expression || "—"}</td>
                   <td className="px-4 py-3 text-xs text-slate-400">
                     {cron.last_run_at ? new Date(cron.last_run_at).toLocaleString("fr-FR") : "—"}
-                    {cron.last_run_status && (
-                      <span className={cn("ml-1.5", cron.last_run_status === "ok" ? "text-emerald-400" : "text-red-400")}>
-                        ({cron.last_run_status})
+                    {cron.last_result && (
+                      <span className={cn("ml-1.5", cron.last_result === "ok" ? "text-emerald-400" : "text-red-400")}>
+                        ({cron.last_result})
                       </span>
                     )}
                   </td>
@@ -885,7 +877,7 @@ function CronsTab({ agentId }: { agentId: string }) {
           <div className="bg-slate-900 border border-slate-700 rounded-xl w-full max-w-sm p-6 space-y-4" onClick={(e) => e.stopPropagation()}>
             <h3 className="text-lg font-semibold text-white">Supprimer ce cron ?</h3>
             <p className="text-sm text-slate-400">
-              Le cron <span className="text-white font-medium">{crons.find((c) => c.id === deletingId)?.name}</span> sera supprime definitivement.
+              Le cron <span className="text-white font-medium">{crons.find((c) => c.id === deletingId)?.time_label || deletingId}</span> sera supprime definitivement.
             </p>
             <div className="flex justify-end gap-3 pt-2">
               <button
