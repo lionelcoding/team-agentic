@@ -13,6 +13,8 @@ import asyncio
 import json
 import logging
 import os
+import re
+import shutil
 import signal
 import subprocess
 import sys
@@ -56,6 +58,22 @@ AGENT_WORKSPACES = {
 ALLOWED_FILES = {
     "SOUL.md", "IDENTITY.md", "HEARTBEAT.md", "AGENTS.md",
     "USER.md", "TOOLS.md", "MEMORY.md",
+}
+
+# Original agents that cannot be deprovisioned
+PROTECTED_AGENTS = {"main", "architect", "tam", "research", "outbound", "monitor"}
+
+# Base path for new agent workspaces
+EAGLE_BASE = "/root/clawd-eagle"
+
+# Agent ID format validation
+AGENT_ID_RE = re.compile(r"^[a-z][a-z0-9-]{1,30}$")
+
+# File templates for provisioned agents
+AGENT_FILE_TEMPLATES = {
+    "SOUL.md": "# {name}\n\n## Role\n{role}\n\n## Description\n{description}\n",
+    "IDENTITY.md": "# Identity: {name}\n\n- **ID**: {agent_id}\n- **Role**: {role}\n- **Model**: {model}\n- **Created**: {created_at}\n",
+    "HEARTBEAT.md": "# Heartbeat\n\nNo activity yet.\n",
 }
 
 # Mapping from OpenClaw health status strings to our DB status values
@@ -103,6 +121,9 @@ class SyncDaemon:
         if dry_run:
             log.info("DRY-RUN mode — commands will be printed, not executed")
 
+        # Load dynamic agents from DB
+        self._load_dynamic_agents()
+
         # Graceful shutdown
         signal.signal(signal.SIGTERM, self._handle_signal)
         signal.signal(signal.SIGINT, self._handle_signal)
@@ -111,6 +132,95 @@ class SyncDaemon:
         name = signal.Signals(signum).name
         log.info("Received %s — shutting down gracefully", name)
         self.running = False
+
+    # ------------------------------------------------------------------
+    # Dynamic agent loading
+    # ------------------------------------------------------------------
+    def _load_dynamic_agents(self):
+        """Load agents from DB that are not in the hardcoded set."""
+        try:
+            resp = self.supabase.table("agents").select("id, workspace_path").execute()
+            for agent in (resp.data or []):
+                aid = agent["id"]
+                wp = agent.get("workspace_path")
+                if aid not in KNOWN_AGENTS and wp:
+                    KNOWN_AGENTS.add(aid)
+                    AGENT_WORKSPACES[aid] = wp
+                    log.info("Loaded dynamic agent: %s -> %s", aid, wp)
+            log.info("Agent registry: %d total (%s)", len(KNOWN_AGENTS), ", ".join(sorted(KNOWN_AGENTS)))
+        except Exception:
+            log.exception("Failed to load dynamic agents from DB — continuing with hardcoded set")
+
+    # ------------------------------------------------------------------
+    # Provision / Deprovision
+    # ------------------------------------------------------------------
+    def _provision_agent(self, agent_id: str, payload: dict) -> dict:
+        """Create workspace + template files for a new agent."""
+        if not AGENT_ID_RE.match(agent_id):
+            raise ValueError(f"Invalid agent_id format: {agent_id}")
+        if agent_id in KNOWN_AGENTS:
+            raise ValueError(f"Agent already exists: {agent_id}")
+
+        name = payload.get("name", agent_id)
+        role = payload.get("role", "")
+        description = payload.get("description", "")
+        model = payload.get("model", "anthropic/claude-sonnet-4-20250514")
+
+        workspace = os.path.join(EAGLE_BASE, agent_id)
+
+        if self.dry_run:
+            log.info("[DRY-RUN] Would provision agent %s at %s", agent_id, workspace)
+            return {"dry_run": True, "agent_id": agent_id, "workspace": workspace}
+
+        os.makedirs(workspace, exist_ok=True)
+
+        created_at = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        template_vars = {
+            "name": name,
+            "agent_id": agent_id,
+            "role": role,
+            "description": description,
+            "model": model,
+            "created_at": created_at,
+        }
+        for filename, template in AGENT_FILE_TEMPLATES.items():
+            path = os.path.join(workspace, filename)
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(template.format(**template_vars))
+
+        # Register dynamically
+        KNOWN_AGENTS.add(agent_id)
+        AGENT_WORKSPACES[agent_id] = workspace
+
+        log.info("Provisioned agent %s at %s", agent_id, workspace)
+        return {
+            "agent_id": agent_id,
+            "workspace": workspace,
+            "files_created": list(AGENT_FILE_TEMPLATES.keys()),
+        }
+
+    def _deprovision_agent(self, agent_id: str) -> dict:
+        """Remove workspace for a non-protected agent."""
+        if agent_id in PROTECTED_AGENTS:
+            raise ValueError(f"Cannot deprovision protected agent: {agent_id}")
+        if agent_id not in KNOWN_AGENTS:
+            raise ValueError(f"Unknown agent: {agent_id}")
+
+        workspace = AGENT_WORKSPACES.get(agent_id)
+
+        if self.dry_run:
+            log.info("[DRY-RUN] Would deprovision agent %s at %s", agent_id, workspace)
+            return {"dry_run": True, "agent_id": agent_id}
+
+        if workspace and os.path.isdir(workspace):
+            shutil.rmtree(workspace)
+            log.info("Removed workspace: %s", workspace)
+
+        KNOWN_AGENTS.discard(agent_id)
+        AGENT_WORKSPACES.pop(agent_id, None)
+
+        log.info("Deprovisioned agent %s", agent_id)
+        return {"agent_id": agent_id, "removed": True}
 
     # ------------------------------------------------------------------
     # Main entry
@@ -195,6 +305,17 @@ class SyncDaemon:
                 COMMANDS["wake"](agent_id, payload), label="restart:start"
             )
             return {"stop": stop_result, "start": start_result}
+
+        # Provision / deprovision — handled locally
+        if command == "provision_agent":
+            if not agent_id:
+                raise ValueError("provision_agent requires agent_id")
+            return self._provision_agent(agent_id, payload)
+
+        if command == "deprovision_agent":
+            if not agent_id:
+                raise ValueError("deprovision_agent requires agent_id")
+            return self._deprovision_agent(agent_id)
 
         # File commands — handled locally, no CLI
         if command in ("list_files", "read_file", "write_file"):

@@ -2,7 +2,8 @@
 
 import { useState, useEffect, useRef } from "react"
 import { useRouter } from "next/navigation"
-import { Bot, Search, Power, PowerOff, RotateCcw, Loader2, Terminal, Tag, Brain, Hash } from "lucide-react"
+import Link from "next/link"
+import { Bot, Search, Power, PowerOff, RotateCcw, Loader2, Terminal, Tag, Brain, Hash, Plus } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { createClient } from "@/lib/supabase/client"
 import { useGatewayCommand } from "@/hooks/useGatewayCommand"
@@ -127,9 +128,21 @@ export default function AgentsPage() {
         "postgres_changes",
         { event: "*", schema: "public", table: "agents" },
         (payload) => {
-          rawRef.current = rawRef.current.map((a) =>
-            a.id === (payload.new as DbAgent)?.id ? { ...a, ...(payload.new as DbAgent) } : a
-          )
+          if (payload.eventType === "INSERT") {
+            const newAgent = payload.new as DbAgent
+            if (!rawRef.current.find((a) => a.id === newAgent.id)) {
+              rawRef.current = [...rawRef.current, newAgent].sort((a, b) => a.name.localeCompare(b.name))
+            }
+          } else if (payload.eventType === "DELETE") {
+            const oldId = (payload.old as { id?: string })?.id
+            if (oldId) {
+              rawRef.current = rawRef.current.filter((a) => a.id !== oldId)
+            }
+          } else {
+            rawRef.current = rawRef.current.map((a) =>
+              a.id === (payload.new as DbAgent)?.id ? { ...a, ...(payload.new as DbAgent) } : a
+            )
+          }
           setAgents([...rawRef.current])
         }
       )
@@ -168,13 +181,22 @@ export default function AgentsPage() {
             {agents.length} agents sur le VPS — controle via gateway_commands
           </p>
         </div>
-        <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-emerald-600/10 border border-emerald-700/30 text-emerald-400 text-xs font-medium">
-          <span className="relative flex h-1.5 w-1.5">
-            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
-            <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-emerald-500" />
+        <div className="flex items-center gap-3">
+          <Link
+            href="/agents/new"
+            className="flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white text-sm font-medium rounded-lg transition-colors"
+          >
+            <Plus className="w-4 h-4" />
+            Creer un agent
+          </Link>
+          <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-emerald-600/10 border border-emerald-700/30 text-emerald-400 text-xs font-medium">
+            <span className="relative flex h-1.5 w-1.5">
+              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
+              <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-emerald-500" />
+            </span>
+            Live
           </span>
-          Live
-        </span>
+        </div>
       </div>
 
       {/* Search */}

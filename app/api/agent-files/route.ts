@@ -1,7 +1,16 @@
 import { NextRequest, NextResponse } from 'next/server'
+import { createClient } from '@/lib/supabase/server'
 import { executeCommand } from '@/lib/gateway'
 
-const KNOWN_AGENTS = new Set(['main', 'architect', 'tam', 'research', 'outbound', 'monitor'])
+async function validateAgentId(agentId: string): Promise<boolean> {
+  const supabase = createClient()
+  const { data } = await supabase
+    .from('agents')
+    .select('id')
+    .eq('id', agentId)
+    .single()
+  return !!data
+}
 
 /**
  * GET /api/agent-files?agent_id=main          → list_files
@@ -12,7 +21,7 @@ export async function GET(request: NextRequest) {
   const agentId = searchParams.get('agent_id')
   const file = searchParams.get('file')
 
-  if (!agentId || !KNOWN_AGENTS.has(agentId)) {
+  if (!agentId || !(await validateAgentId(agentId))) {
     return NextResponse.json({ error: 'Invalid agent_id' }, { status: 400 })
   }
 
@@ -37,7 +46,7 @@ export async function PUT(request: NextRequest) {
   const body = await request.json()
   const { agent_id: agentId, file, content } = body
 
-  if (!agentId || !KNOWN_AGENTS.has(agentId)) {
+  if (!agentId || !(await validateAgentId(agentId))) {
     return NextResponse.json({ error: 'Invalid agent_id' }, { status: 400 })
   }
   if (!file || content === undefined) {

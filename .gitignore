@@ -25,3 +25,12 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# macOS
+._*
+.DS_Store
+
+# python
+__pycache__/
+*.pyc
+.pytest_cache/
