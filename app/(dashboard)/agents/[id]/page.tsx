@@ -440,7 +440,7 @@ function FilesTab({ agentId }: { agentId: string }) {
             <textarea
               value={content}
               onChange={(e) => setContent(e.target.value)}
-              className="flex-1 w-full bg-slate-900/80 border border-slate-700/50 rounded-lg p-4 text-sm text-slate-300 font-mono resize-none focus:outline-none focus:border-blue-500/50 leading-relaxed"
+              className="flex-1 w-full min-h-[400px] bg-slate-900/80 border border-slate-700/50 rounded-lg p-4 text-sm text-slate-300 font-mono resize-y focus:outline-none focus:border-blue-500/50 leading-relaxed"
               spellCheck={false}
             />
           </>
@@ -521,7 +521,7 @@ function CronsTab({ agentId }: { agentId: string }) {
   }, [])
 
   // Filter crons relevant to this agent (or show all if none have agentId)
-  const filtered = crons.filter((c) => !c.agentId || c.agentId === agentId)
+  const filtered = crons.filter((c) => c.agentId === agentId)
 
   if (loading) {
     return (
