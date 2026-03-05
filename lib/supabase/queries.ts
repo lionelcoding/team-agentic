@@ -170,6 +170,47 @@ function mapDbAgentToFrontend(row: any): Agent {
 }
 
 // ============================================================
+// AGENT ACTIONS
+// ============================================================
+
+export interface DbAgentAction {
+  id: string
+  agent_id: string
+  action_type: string
+  description: string | null
+  result: string | null
+  data: Record<string, unknown> | null
+  tokens_used: number
+  cost: number
+  duration_ms: number | null
+  model_used: string | null
+  session_id: string | null
+  related_lead_id: string | null
+  related_signal_id: string | null
+  created_at: string
+}
+
+export async function getAgentActions(agentId?: string): Promise<DbAgentAction[]> {
+  let query = supabase
+    .from('agent_actions')
+    .select('*')
+    .order('created_at', { ascending: false })
+
+  if (agentId) {
+    query = query.eq('agent_id', agentId)
+  }
+
+  const { data, error } = await query
+
+  if (error) {
+    console.error('Error fetching agent actions:', error)
+    return []
+  }
+
+  return data || []
+}
+
+// ============================================================
 // LEADS
 // ============================================================
 

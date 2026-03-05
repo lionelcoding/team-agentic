@@ -7,6 +7,7 @@ import {
   ArrowLeft, Bot, Power, PowerOff, RotateCcw, Loader2,
   FileText, Clock, Play, ToggleLeft, ToggleRight,
   Save, Terminal, Tag, Brain, Hash, AlertCircle, CheckCircle2, Activity,
+  Plus, Pencil, Trash2, X,
 } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { createClient } from "@/lib/supabase/client"
@@ -42,22 +43,6 @@ interface WorkspaceFile {
   filename: string
   size: number
   modified: string
-}
-
-interface CronJob {
-  id: string
-  name: string
-  description?: string
-  schedule: { expr: string; tz?: string; kind?: string }
-  enabled: boolean
-  agentId?: string
-  state?: {
-    lastStatus?: string
-    lastRunAtMs?: number
-    nextRunAtMs?: number
-    lastRunStatus?: string
-    consecutiveErrors?: number
-  }
 }
 
 const statusConfig: Record<string, { color: string; label: string; pulse: boolean }> = {
@@ -461,36 +446,107 @@ function FilesTab({ agentId }: { agentId: string }) {
 }
 
 // ---------------------------------------------------------------------------
-// Crons Tab
+// Crons Tab — reads from cron_schedule DB table + realtime + CRUD
 // ---------------------------------------------------------------------------
+interface DbCronSchedule {
+  id: string
+  name: string
+  description: string | null
+  cron_expression: string
+  agent_id: string | null
+  action_type: string
+  payload: Record<string, unknown> | null
+  enabled: boolean
+  last_run_at: string | null
+  last_run_status: string | null
+  next_run_at: string | null
+  total_runs: number
+  failed_runs: number
+  created_at: string
+  updated_at: string
+}
+
+interface CronFormData {
+  name: string
+  schedule_expr: string
+  description: string
+}
+
 function CronsTab({ agentId }: { agentId: string }) {
-  const [crons, setCrons] = useState<CronJob[]>([])
+  const [crons, setCrons] = useState<DbCronSchedule[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [actionLoading, setActionLoading] = useState<Record<string, boolean>>({})
   const [actionStatus, setActionStatus] = useState<Record<string, "success" | "error">>({})
 
+  // Modal state
+  const [modalOpen, setModalOpen] = useState(false)
+  const [editingCron, setEditingCron] = useState<DbCronSchedule | null>(null)
+  const [formData, setFormData] = useState<CronFormData>({ name: "", schedule_expr: "", description: "" })
+  const [formLoading, setFormLoading] = useState(false)
+  const [formError, setFormError] = useState<string | null>(null)
+
+  // Delete confirmation
+  const [deletingId, setDeletingId] = useState<string | null>(null)
+  const [deleteLoading, setDeleteLoading] = useState(false)
+
+  // Fetch from cron_schedule table
   useEffect(() => {
+    const supabase = createClient()
+
     async function fetchCrons() {
       setLoading(true)
       setError(null)
-      try {
-        const res = await fetch("/api/crons")
-        const data = await res.json()
-        if (!res.ok) throw new Error(data.error)
-        // Normalize: data may be { crons: [...] } or { output: "..." } or array
-        const list = Array.isArray(data) ? data : (data.crons || data.jobs || [])
-        setCrons(list)
-      } catch (err) {
-        setError(err instanceof Error ? err.message : "Erreur de chargement")
+      const { data, error: fetchErr } = await supabase
+        .from("cron_schedule")
+        .select("*")
+        .eq("agent_id", agentId)
+        .order("name")
+      if (fetchErr) {
+        setError(fetchErr.message)
+      } else {
+        setCrons(data || [])
       }
       setLoading(false)
     }
-    fetchCrons()
-  }, [])
 
-  const runCron = useCallback(async (cronId: string) => {
-    setActionLoading((s) => ({ ...s, [cronId]: true }))
+    fetchCrons()
+
+    // Realtime on cron_schedule filtered by agent_id
+    const channel = supabase
+      .channel(`crons-${agentId}`)
+      .on("postgres_changes", {
+        event: "INSERT", schema: "public", table: "cron_schedule",
+        filter: `agent_id=eq.${agentId}`,
+      }, (payload) => {
+        setCrons((prev) => [...prev, payload.new as DbCronSchedule])
+      })
+      .on("postgres_changes", {
+        event: "UPDATE", schema: "public", table: "cron_schedule",
+        filter: `agent_id=eq.${agentId}`,
+      }, (payload) => {
+        setCrons((prev) => prev.map((c) => c.id === (payload.new as DbCronSchedule).id ? payload.new as DbCronSchedule : c))
+      })
+      .on("postgres_changes", {
+        event: "DELETE", schema: "public", table: "cron_schedule",
+      }, (payload) => {
+        setCrons((prev) => prev.filter((c) => c.id !== (payload.old as { id: string }).id))
+      })
+      .subscribe()
+
+    return () => { supabase.removeChannel(channel) }
+  }, [agentId])
+
+  // Get the openclaw cron_id from payload
+  const getOpenClawId = (cron: DbCronSchedule): string => {
+    const p = cron.payload as Record<string, unknown> | null
+    return (p?.openclaw_cron_id as string) || cron.id
+  }
+
+  // Run cron
+  const runCron = useCallback(async (cron: DbCronSchedule) => {
+    const cronId = getOpenClawId(cron)
+    setActionLoading((s) => ({ ...s, [cron.id]: true }))
     try {
       const res = await fetch("/api/crons", {
         method: "POST",
@@ -498,32 +554,116 @@ function CronsTab({ agentId }: { agentId: string }) {
         body: JSON.stringify({ action: "run", cron_id: cronId }),
       })
       if (!res.ok) throw new Error((await res.json()).error)
-      setActionStatus((s) => ({ ...s, [cronId]: "success" }))
-      setTimeout(() => setActionStatus((s) => { const n = { ...s }; delete n[cronId]; return n }), 3000)
+      setActionStatus((s) => ({ ...s, [cron.id]: "success" }))
+      setTimeout(() => setActionStatus((s) => { const n = { ...s }; delete n[cron.id]; return n }), 3000)
     } catch {
-      setActionStatus((s) => ({ ...s, [cronId]: "error" }))
+      setActionStatus((s) => ({ ...s, [cron.id]: "error" }))
     }
-    setActionLoading((s) => ({ ...s, [cronId]: false }))
+    setActionLoading((s) => ({ ...s, [cron.id]: false }))
   }, [])
 
-  const toggleCron = useCallback(async (cronId: string, enabled: boolean) => {
-    setActionLoading((s) => ({ ...s, [`toggle-${cronId}`]: true }))
+  // Toggle cron
+  const toggleCron = useCallback(async (cron: DbCronSchedule) => {
+    const cronId = getOpenClawId(cron)
+    const key = `toggle-${cron.id}`
+    setActionLoading((s) => ({ ...s, [key]: true }))
     try {
       const res = await fetch("/api/crons", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "toggle", cron_id: cronId, enabled }),
+        body: JSON.stringify({ action: "toggle", cron_id: cronId, enabled: !cron.enabled }),
       })
       if (!res.ok) throw new Error((await res.json()).error)
-      setCrons((prev) => prev.map((c) => c.id === cronId ? { ...c, enabled } : c))
     } catch {
-      setActionStatus((s) => ({ ...s, [`toggle-${cronId}`]: "error" }))
+      setActionStatus((s) => ({ ...s, [key]: "error" }))
     }
-    setActionLoading((s) => ({ ...s, [`toggle-${cronId}`]: false }))
+    setActionLoading((s) => ({ ...s, [key]: false }))
   }, [])
 
-  // Filter crons relevant to this agent (or show all if none have agentId)
-  const filtered = crons.filter((c) => c.agentId === agentId)
+  // Open create modal
+  const openCreate = () => {
+    setEditingCron(null)
+    setFormData({ name: "", schedule_expr: "", description: "" })
+    setFormError(null)
+    setModalOpen(true)
+  }
+
+  // Open edit modal
+  const openEdit = (cron: DbCronSchedule) => {
+    setEditingCron(cron)
+    setFormData({
+      name: cron.name,
+      schedule_expr: cron.cron_expression,
+      description: cron.description || "",
+    })
+    setFormError(null)
+    setModalOpen(true)
+  }
+
+  // Submit create/edit
+  const handleSubmit = async () => {
+    if (!formData.name.trim() || !formData.schedule_expr.trim()) {
+      setFormError("Nom et expression cron requis")
+      return
+    }
+    setFormLoading(true)
+    setFormError(null)
+    try {
+      if (editingCron) {
+        const cronId = getOpenClawId(editingCron)
+        const res = await fetch("/api/crons", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            action: "update",
+            cron_id: cronId,
+            name: formData.name,
+            schedule_expr: formData.schedule_expr,
+            description: formData.description,
+          }),
+        })
+        if (!res.ok) throw new Error((await res.json()).error)
+      } else {
+        const res = await fetch("/api/crons", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            action: "create",
+            agent_id: agentId,
+            name: formData.name,
+            schedule_expr: formData.schedule_expr,
+            description: formData.description,
+          }),
+        })
+        if (!res.ok) throw new Error((await res.json()).error)
+      }
+      setModalOpen(false)
+    } catch (err) {
+      setFormError(err instanceof Error ? err.message : "Erreur")
+    }
+    setFormLoading(false)
+  }
+
+  // Delete cron
+  const handleDelete = async () => {
+    if (!deletingId) return
+    const cron = crons.find((c) => c.id === deletingId)
+    if (!cron) return
+    const cronId = getOpenClawId(cron)
+    setDeleteLoading(true)
+    try {
+      const res = await fetch("/api/crons", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "delete", cron_id: cronId }),
+      })
+      if (!res.ok) throw new Error((await res.json()).error)
+      setDeletingId(null)
+    } catch {
+      setActionStatus((s) => ({ ...s, [`delete-${deletingId}`]: "error" }))
+    }
+    setDeleteLoading(false)
+  }
 
   if (loading) {
     return (
@@ -543,102 +683,229 @@ function CronsTab({ agentId }: { agentId: string }) {
     )
   }
 
-  if (filtered.length === 0) {
-    return (
-      <div className="text-center py-16">
-        <Clock className="w-10 h-10 text-slate-600 mx-auto mb-3" />
-        <p className="text-slate-500 text-sm">Aucun cron pour cet agent</p>
-      </div>
-    )
-  }
-
   return (
-    <div className="bg-slate-800/50 border border-slate-700/50 rounded-xl overflow-hidden">
-      <table className="w-full text-sm">
-        <thead>
-          <tr className="border-b border-slate-700/50">
-            <th className="text-left text-xs text-slate-500 uppercase tracking-wider px-4 py-3">Nom</th>
-            <th className="text-left text-xs text-slate-500 uppercase tracking-wider px-4 py-3">Schedule</th>
-            <th className="text-left text-xs text-slate-500 uppercase tracking-wider px-4 py-3">Dernier run</th>
-            <th className="text-left text-xs text-slate-500 uppercase tracking-wider px-4 py-3">Statut</th>
-            <th className="text-right text-xs text-slate-500 uppercase tracking-wider px-4 py-3">Actions</th>
-          </tr>
-        </thead>
-        <tbody>
-          {filtered.map((cron) => (
-            <tr key={cron.id} className="border-b border-slate-700/30 last:border-b-0 hover:bg-slate-700/20 transition-colors">
-              <td className="px-4 py-3">
-                <div>
-                  <span className="text-white font-medium">{cron.name || cron.id}</span>
-                  {cron.agentId && (
-                    <span className="ml-2 text-[10px] text-slate-500 bg-slate-700/50 px-1.5 py-0.5 rounded">
-                      {cron.agentId}
-                    </span>
-                  )}
-                </div>
-                {cron.description && (
-                  <p className="text-[11px] text-slate-500 mt-0.5 truncate max-w-xs">{cron.description}</p>
-                )}
-              </td>
-              <td className="px-4 py-3 font-mono text-xs text-slate-400">{cron.schedule?.expr || "—"}</td>
-              <td className="px-4 py-3 text-xs text-slate-400">
-                {cron.state?.lastRunAtMs ? new Date(cron.state.lastRunAtMs).toLocaleString("fr-FR") : "—"}
-                {cron.state?.lastRunStatus && (
-                  <span className={cn("ml-1.5", cron.state.lastRunStatus === "ok" ? "text-emerald-400" : "text-red-400")}>
-                    ({cron.state.lastRunStatus})
-                  </span>
-                )}
-              </td>
-              <td className="px-4 py-3">
-                <span className={cn(
-                  "inline-flex items-center gap-1 text-xs font-medium px-2 py-0.5 rounded-full",
-                  cron.enabled
-                    ? "bg-emerald-500/10 text-emerald-400 border border-emerald-500/20"
-                    : "bg-slate-500/10 text-slate-400 border border-slate-500/20"
-                )}>
-                  {cron.enabled ? "Actif" : "Inactif"}
-                </span>
-              </td>
-              <td className="px-4 py-3 text-right">
-                <div className="flex items-center justify-end gap-2">
-                  {/* Run now */}
-                  <button
-                    onClick={() => runCron(cron.id)}
-                    disabled={!!actionLoading[cron.id]}
-                    className={cn(
-                      "flex items-center gap-1 px-2.5 py-1.5 rounded-md text-xs font-medium transition-all disabled:opacity-50",
-                      actionStatus[cron.id] === "success"
-                        ? "bg-emerald-500/15 text-emerald-400 border border-emerald-500/20"
-                        : actionStatus[cron.id] === "error"
-                        ? "bg-red-500/15 text-red-400 border border-red-500/20"
-                        : "bg-blue-500/15 text-blue-400 hover:bg-blue-500/25 border border-blue-500/20"
-                    )}
-                  >
-                    {actionLoading[cron.id] ? <Loader2 className="w-3 h-3 animate-spin" /> : <Play className="w-3 h-3" />}
-                    Run
-                  </button>
+    <div className="space-y-4">
+      {/* Header with create button */}
+      <div className="flex items-center justify-between">
+        <h3 className="text-sm font-semibold text-slate-200">
+          Crons ({crons.length})
+        </h3>
+        <button
+          onClick={openCreate}
+          className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-sm font-medium bg-blue-500/15 text-blue-400 hover:bg-blue-500/25 border border-blue-500/20 transition-all"
+        >
+          <Plus className="w-4 h-4" />
+          Creer un cron
+        </button>
+      </div>
 
-                  {/* Toggle */}
-                  <button
-                    onClick={() => toggleCron(cron.id, !cron.enabled)}
-                    disabled={!!actionLoading[`toggle-${cron.id}`]}
-                    className="flex items-center gap-1 px-2.5 py-1.5 rounded-md text-xs font-medium transition-all disabled:opacity-50 bg-slate-700/50 text-slate-300 hover:bg-slate-700 border border-slate-600/30"
-                  >
-                    {actionLoading[`toggle-${cron.id}`] ? (
-                      <Loader2 className="w-3 h-3 animate-spin" />
-                    ) : cron.enabled ? (
-                      <ToggleRight className="w-3.5 h-3.5 text-emerald-400" />
-                    ) : (
-                      <ToggleLeft className="w-3.5 h-3.5" />
+      {crons.length === 0 ? (
+        <div className="text-center py-16">
+          <Clock className="w-10 h-10 text-slate-600 mx-auto mb-3" />
+          <p className="text-slate-500 text-sm">Aucun cron pour cet agent</p>
+        </div>
+      ) : (
+        <div className="bg-slate-800/50 border border-slate-700/50 rounded-xl overflow-hidden">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b border-slate-700/50">
+                <th className="text-left text-xs text-slate-500 uppercase tracking-wider px-4 py-3">Nom</th>
+                <th className="text-left text-xs text-slate-500 uppercase tracking-wider px-4 py-3">Schedule</th>
+                <th className="text-left text-xs text-slate-500 uppercase tracking-wider px-4 py-3">Dernier run</th>
+                <th className="text-left text-xs text-slate-500 uppercase tracking-wider px-4 py-3">Statut</th>
+                <th className="text-right text-xs text-slate-500 uppercase tracking-wider px-4 py-3">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {crons.map((cron) => (
+                <tr key={cron.id} className="border-b border-slate-700/30 last:border-b-0 hover:bg-slate-700/20 transition-colors">
+                  <td className="px-4 py-3">
+                    <span className="text-white font-medium">{cron.name}</span>
+                    {cron.description && (
+                      <p className="text-[11px] text-slate-500 mt-0.5 truncate max-w-xs">{cron.description}</p>
                     )}
-                    {cron.enabled ? "Desactiver" : "Activer"}
-                  </button>
-                </div>
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
+                  </td>
+                  <td className="px-4 py-3 font-mono text-xs text-slate-400">{cron.cron_expression || "—"}</td>
+                  <td className="px-4 py-3 text-xs text-slate-400">
+                    {cron.last_run_at ? new Date(cron.last_run_at).toLocaleString("fr-FR") : "—"}
+                    {cron.last_run_status && (
+                      <span className={cn("ml-1.5", cron.last_run_status === "ok" ? "text-emerald-400" : "text-red-400")}>
+                        ({cron.last_run_status})
+                      </span>
+                    )}
+                  </td>
+                  <td className="px-4 py-3">
+                    <span className={cn(
+                      "inline-flex items-center gap-1 text-xs font-medium px-2 py-0.5 rounded-full",
+                      cron.enabled
+                        ? "bg-emerald-500/10 text-emerald-400 border border-emerald-500/20"
+                        : "bg-slate-500/10 text-slate-400 border border-slate-500/20"
+                    )}>
+                      {cron.enabled ? "Actif" : "Inactif"}
+                    </span>
+                  </td>
+                  <td className="px-4 py-3 text-right">
+                    <div className="flex items-center justify-end gap-1.5">
+                      {/* Run */}
+                      <button
+                        onClick={() => runCron(cron)}
+                        disabled={!!actionLoading[cron.id]}
+                        className={cn(
+                          "flex items-center gap-1 px-2 py-1.5 rounded-md text-xs font-medium transition-all disabled:opacity-50",
+                          actionStatus[cron.id] === "success"
+                            ? "bg-emerald-500/15 text-emerald-400 border border-emerald-500/20"
+                            : actionStatus[cron.id] === "error"
+                            ? "bg-red-500/15 text-red-400 border border-red-500/20"
+                            : "bg-blue-500/15 text-blue-400 hover:bg-blue-500/25 border border-blue-500/20"
+                        )}
+                      >
+                        {actionLoading[cron.id] ? <Loader2 className="w-3 h-3 animate-spin" /> : <Play className="w-3 h-3" />}
+                        Run
+                      </button>
+
+                      {/* Toggle */}
+                      <button
+                        onClick={() => toggleCron(cron)}
+                        disabled={!!actionLoading[`toggle-${cron.id}`]}
+                        className="p-1.5 rounded-md text-xs transition-all disabled:opacity-50 bg-slate-700/50 text-slate-300 hover:bg-slate-700 border border-slate-600/30"
+                        title={cron.enabled ? "Desactiver" : "Activer"}
+                      >
+                        {actionLoading[`toggle-${cron.id}`] ? (
+                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        ) : cron.enabled ? (
+                          <ToggleRight className="w-3.5 h-3.5 text-emerald-400" />
+                        ) : (
+                          <ToggleLeft className="w-3.5 h-3.5" />
+                        )}
+                      </button>
+
+                      {/* Edit */}
+                      <button
+                        onClick={() => openEdit(cron)}
+                        className="p-1.5 rounded-md text-xs transition-all bg-slate-700/50 text-slate-300 hover:bg-slate-700 border border-slate-600/30"
+                        title="Modifier"
+                      >
+                        <Pencil className="w-3.5 h-3.5" />
+                      </button>
+
+                      {/* Delete */}
+                      <button
+                        onClick={() => setDeletingId(cron.id)}
+                        className="p-1.5 rounded-md text-xs transition-all bg-red-500/10 text-red-400 hover:bg-red-500/20 border border-red-500/20"
+                        title="Supprimer"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {/* Create / Edit modal */}
+      {modalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={() => setModalOpen(false)}>
+          <div className="bg-slate-900 border border-slate-700 rounded-xl w-full max-w-md p-6 space-y-4" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between">
+              <h3 className="text-lg font-semibold text-white">
+                {editingCron ? "Modifier le cron" : "Creer un cron"}
+              </h3>
+              <button onClick={() => setModalOpen(false)} className="text-slate-400 hover:text-white">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="space-y-3">
+              <div>
+                <label className="block text-xs text-slate-400 mb-1">Nom</label>
+                <input
+                  type="text"
+                  value={formData.name}
+                  onChange={(e) => setFormData((f) => ({ ...f, name: e.target.value }))}
+                  className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500"
+                  placeholder="daily-report"
+                />
+              </div>
+              <div>
+                <label className="block text-xs text-slate-400 mb-1">Expression cron</label>
+                <input
+                  type="text"
+                  value={formData.schedule_expr}
+                  onChange={(e) => setFormData((f) => ({ ...f, schedule_expr: e.target.value }))}
+                  className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white font-mono focus:outline-none focus:border-blue-500"
+                  placeholder="0 9 * * *"
+                />
+                <p className="text-[10px] text-slate-500 mt-1">min heure jour mois jour-semaine (ex: 0 9 * * 1-5 = 9h lun-ven)</p>
+              </div>
+              <div>
+                <label className="block text-xs text-slate-400 mb-1">Description (optionnel)</label>
+                <input
+                  type="text"
+                  value={formData.description}
+                  onChange={(e) => setFormData((f) => ({ ...f, description: e.target.value }))}
+                  className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500"
+                  placeholder="Rapport quotidien..."
+                />
+              </div>
+            </div>
+
+            {formError && (
+              <div className="flex items-center gap-2 text-xs text-red-400 bg-red-500/10 border border-red-500/20 rounded-lg px-3 py-2">
+                <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+                {formError}
+              </div>
+            )}
+
+            <div className="flex justify-end gap-3 pt-2">
+              <button
+                onClick={() => setModalOpen(false)}
+                className="px-4 py-2 rounded-lg text-sm text-slate-400 hover:text-white transition-colors"
+              >
+                Annuler
+              </button>
+              <button
+                onClick={handleSubmit}
+                disabled={formLoading}
+                className="flex items-center gap-1.5 px-4 py-2 rounded-lg text-sm font-medium bg-blue-500/15 text-blue-400 hover:bg-blue-500/25 border border-blue-500/20 transition-all disabled:opacity-50"
+              >
+                {formLoading && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                {editingCron ? "Modifier" : "Creer"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Delete confirmation modal */}
+      {deletingId && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={() => setDeletingId(null)}>
+          <div className="bg-slate-900 border border-slate-700 rounded-xl w-full max-w-sm p-6 space-y-4" onClick={(e) => e.stopPropagation()}>
+            <h3 className="text-lg font-semibold text-white">Supprimer ce cron ?</h3>
+            <p className="text-sm text-slate-400">
+              Le cron <span className="text-white font-medium">{crons.find((c) => c.id === deletingId)?.name}</span> sera supprime definitivement.
+            </p>
+            <div className="flex justify-end gap-3 pt-2">
+              <button
+                onClick={() => setDeletingId(null)}
+                className="px-4 py-2 rounded-lg text-sm text-slate-400 hover:text-white transition-colors"
+              >
+                Annuler
+              </button>
+              <button
+                onClick={handleDelete}
+                disabled={deleteLoading}
+                className="flex items-center gap-1.5 px-4 py-2 rounded-lg text-sm font-medium bg-red-500/15 text-red-400 hover:bg-red-500/25 border border-red-500/20 transition-all disabled:opacity-50"
+              >
+                {deleteLoading && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                Supprimer
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

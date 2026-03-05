@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """sync-daemon.py — Bridge between Supabase gateway_commands and OpenClaw CLI.
 
-Runs two concurrent loops:
-  A) poll_commands  — every 5s, picks up pending commands and executes them
-  B) sync_agent_status — every 30s, reads OpenClaw health and updates agents table
+Runs five concurrent loops:
+  A) poll_commands      — every 5s, picks up pending commands and executes them
+  B) sync_agent_status  — every 30s, reads OpenClaw health and updates agents table
+  C) parse_sessions     — every 60s, parses JSONL session files → agent_actions
+  D) push_usage_cost    — every 5min, reads openclaw usage-cost → cost_entries
+  E) sync_crons         — every 5min, reads openclaw cron list → cron_schedule
 
 Pattern DA-6 "sortant uniquement": all connections are outbound from VPS to Supabase.
 """
@@ -18,6 +21,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import uuid
 from datetime import datetime, timezone
 
 from dotenv import load_dotenv
@@ -29,6 +33,13 @@ from supabase import create_client, Client
 COMMAND_POLL_INTERVAL = 5     # seconds
 STATUS_SYNC_INTERVAL = 30    # seconds
 COMMAND_TIMEOUT = 60          # seconds
+JSONL_PARSE_INTERVAL = 60    # seconds — Loop C
+USAGE_COST_INTERVAL = 300    # seconds — Loop D (5 min)
+CRON_SYNC_INTERVAL = 300     # seconds — Loop E (5 min)
+
+# Session JSONL parsing
+SESSIONS_BASE = "/root/.openclaw/agents"
+CURSOR_FILE = "/tmp/sync-daemon-cursors.json"
 
 # Command map: name → callable(agent_id, payload) → list of CLI args
 COMMANDS: dict[str, callable] = {
@@ -39,6 +50,9 @@ COMMANDS: dict[str, callable] = {
     "list_crons": lambda _, __: ["openclaw", "cron", "list", "--json"],
     "run_cron":   lambda _, p: ["openclaw", "cron", "run", p.get("cron_id", ""), "--json"],
     "toggle_cron": lambda _, p: ["openclaw", "cron", "enable" if p.get("enabled") else "disable", p.get("cron_id", "")],
+    "create_cron": lambda aid, p: ["openclaw", "cron", "add", "--agent", aid or p.get("agent_id", ""), "--name", p.get("name", ""), "--schedule", p.get("schedule_expr", ""), "--json"],
+    "update_cron": lambda _, p: ["openclaw", "cron", "update", p.get("cron_id", "")] + (["--name", p["name"]] if p.get("name") else []) + (["--schedule", p["schedule_expr"]] if p.get("schedule_expr") else []) + ["--json"],
+    "delete_cron": lambda _, p: ["openclaw", "cron", "remove", p.get("cron_id", ""), "--json"],
 }
 
 # Agent IDs that exist on the VPS
@@ -230,6 +244,9 @@ class SyncDaemon:
         await asyncio.gather(
             self._poll_commands_loop(),
             self._sync_status_loop(),
+            self._parse_sessions_loop(),
+            self._push_usage_cost_loop(),
+            self._sync_crons_loop(),
         )
         log.info("Sync daemon stopped")
 
@@ -283,6 +300,10 @@ class SyncDaemon:
                 "processed_at": datetime.now(timezone.utc).isoformat(),
             }).eq("id", cmd_id).execute()
             log.info("Command %s completed successfully", cmd_id)
+
+            # Sync crons immediately after cron mutations
+            if command in ("create_cron", "update_cron", "delete_cron", "toggle_cron"):
+                await self._sync_crons()
 
         except Exception as exc:
             error_msg = str(exc)
@@ -532,6 +553,388 @@ class SyncDaemon:
 
         if updated:
             log.info("Synced status for %d agent(s)", updated)
+
+    # ------------------------------------------------------------------
+    # Cursor persistence for JSONL parsing
+    # ------------------------------------------------------------------
+    def _load_cursors(self) -> dict:
+        try:
+            with open(CURSOR_FILE, "r") as f:
+                return json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            return {}
+
+    def _save_cursors(self, cursors: dict):
+        with open(CURSOR_FILE, "w") as f:
+            json.dump(cursors, f)
+
+    # ------------------------------------------------------------------
+    # Loop C: parse sessions JSONL → agent_actions (60s)
+    # ------------------------------------------------------------------
+    async def _parse_sessions_loop(self):
+        while self.running:
+            try:
+                await self._parse_sessions()
+            except Exception:
+                log.exception("Error in parse_sessions")
+            await asyncio.sleep(JSONL_PARSE_INTERVAL)
+
+    async def _parse_sessions(self):
+        if self.dry_run:
+            log.info("[DRY-RUN] Would parse session JSONL files")
+            return
+
+        if not os.path.isdir(SESSIONS_BASE):
+            log.debug("Sessions base not found: %s", SESSIONS_BASE)
+            return
+
+        cursors = self._load_cursors()
+        total_inserted = 0
+
+        for agent_id in sorted(KNOWN_AGENTS):
+            sessions_dir = os.path.join(SESSIONS_BASE, agent_id, "sessions")
+            if not os.path.isdir(sessions_dir):
+                continue
+
+            agent_cursors = cursors.get(agent_id, {})
+            agent_inserted = 0
+
+            for fname in os.listdir(sessions_dir):
+                if not fname.endswith(".jsonl"):
+                    continue
+                # Skip deleted/reset sessions
+                if fname.startswith(".deleted.") or fname.startswith(".reset."):
+                    continue
+
+                session_id = fname[:-6]  # strip .jsonl
+                fpath = os.path.join(sessions_dir, fname)
+                last_line = agent_cursors.get(session_id, 0)
+
+                try:
+                    actions = self._extract_actions_from_jsonl(
+                        fpath, agent_id, session_id, last_line
+                    )
+                except Exception:
+                    log.exception("Failed to parse %s", fpath)
+                    continue
+
+                if not actions:
+                    continue
+
+                # Batch insert
+                try:
+                    self.supabase.table("agent_actions").insert(actions).execute()
+                    new_cursor = last_line + len(actions)
+                    agent_cursors[session_id] = new_cursor
+                    agent_inserted += len(actions)
+                except Exception:
+                    log.exception("Failed to insert %d actions for %s/%s",
+                                  len(actions), agent_id, session_id)
+
+            if agent_inserted:
+                log.info("Parsed %d actions from agent %s", agent_inserted, agent_id)
+
+            cursors[agent_id] = agent_cursors
+            total_inserted += agent_inserted
+
+        self._save_cursors(cursors)
+        if total_inserted:
+            log.info("Total: inserted %d agent_actions", total_inserted)
+            # Aggregate costs per agent after new actions
+            await self._aggregate_agent_costs()
+
+    def _extract_actions_from_jsonl(
+        self, fpath: str, agent_id: str, session_id: str, skip_lines: int
+    ) -> list[dict]:
+        """Read JSONL file from skip_lines offset, extract assistant messages with tool calls."""
+        actions = []
+        line_num = 0
+
+        with open(fpath, "r", encoding="utf-8") as f:
+            for raw_line in f:
+                line_num += 1
+                if line_num <= skip_lines:
+                    continue
+
+                raw_line = raw_line.strip()
+                if not raw_line:
+                    continue
+
+                try:
+                    entry = json.loads(raw_line)
+                except json.JSONDecodeError:
+                    continue
+
+                if entry.get("type") != "message":
+                    continue
+
+                msg = entry.get("message", {})
+                if msg.get("role") != "assistant":
+                    continue
+
+                usage = msg.get("usage", {})
+                if not usage:
+                    continue
+
+                content = msg.get("content", [])
+                tool_calls = [c for c in content if c.get("type") == "toolCall"]
+                if not tool_calls:
+                    continue
+
+                # Use first tool call as the action type
+                first_tool = tool_calls[0]
+                tool_name = first_tool.get("name", "unknown")
+
+                # Build description: "read + bash + write (+2 more) | {args preview}"
+                tool_names = [c.get("name", "?") for c in tool_calls]
+                shown = tool_names[:3]
+                desc_parts = " + ".join(shown)
+                if len(tool_names) > 3:
+                    desc_parts += f" (+{len(tool_names) - 3} more)"
+                args_preview = json.dumps(first_tool.get("arguments", {}))
+                if len(args_preview) > 120:
+                    args_preview = args_preview[:120] + "..."
+                description = f"{desc_parts} | {args_preview}"
+
+                cost_data = usage.get("cost", {})
+                timestamp = entry.get("timestamp", datetime.now(timezone.utc).isoformat())
+
+                actions.append({
+                    "agent_id": agent_id,
+                    "action_type": tool_name,
+                    "description": description,
+                    "tokens_used": usage.get("totalTokens", 0),
+                    "cost": cost_data.get("total", 0),
+                    "model_used": msg.get("model"),
+                    "session_id": session_id,
+                    "result": "success",
+                    "created_at": timestamp,
+                })
+
+        return actions
+
+    # ------------------------------------------------------------------
+    # Per-agent cost aggregation (called after JSONL parse)
+    # ------------------------------------------------------------------
+    async def _aggregate_agent_costs(self):
+        """Sum tokens+cost from agent_actions per agent for today, UPSERT into cost_entries."""
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        try:
+            resp = self.supabase.table("agent_actions") \
+                .select("agent_id, tokens_used, cost, model_used") \
+                .gte("created_at", f"{today}T00:00:00Z") \
+                .execute()
+        except Exception:
+            log.exception("Failed to query agent_actions for cost aggregation")
+            return
+
+        rows = resp.data or []
+        if not rows:
+            return
+
+        # Aggregate per agent
+        agg: dict[str, dict] = {}
+        for r in rows:
+            aid = r.get("agent_id")
+            if not aid:
+                continue
+            if aid not in agg:
+                agg[aid] = {"tokens": 0, "cost": 0.0, "model": None}
+            agg[aid]["tokens"] += r.get("tokens_used", 0) or 0
+            agg[aid]["cost"] += r.get("cost", 0) or 0
+            if r.get("model_used"):
+                agg[aid]["model"] = r["model_used"]
+
+        upserted = 0
+        for aid, data in agg.items():
+            try:
+                det_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"agent-cost-{aid}-{today}"))
+                self.supabase.table("cost_entries").upsert({
+                    "id": det_id,
+                    "agent_id": aid,
+                    "cost_type": "variable",
+                    "category": "api_tokens",
+                    "amount": round(data["cost"], 6),
+                    "currency": "USD",
+                    "tokens_used": data["tokens"],
+                    "model_used": data["model"],
+                    "description": f"Agent {aid} daily usage",
+                    "date": today,
+                }, on_conflict="id").execute()
+                upserted += 1
+            except Exception:
+                log.exception("Failed to upsert cost entry for agent %s", aid)
+
+        if upserted:
+            log.info("Aggregated costs for %d agent(s) on %s", upserted, today)
+
+    # ------------------------------------------------------------------
+    # Loop D: usage-cost → cost_entries (5min)
+    # ------------------------------------------------------------------
+    async def _push_usage_cost_loop(self):
+        while self.running:
+            try:
+                await self._push_usage_cost()
+            except Exception:
+                log.exception("Error in push_usage_cost")
+            await asyncio.sleep(USAGE_COST_INTERVAL)
+
+    async def _push_usage_cost(self):
+        if self.dry_run:
+            log.info("[DRY-RUN] Would run: openclaw gateway usage-cost --json")
+            return
+
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "openclaw", "gateway", "usage-cost", "--json",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(), timeout=COMMAND_TIMEOUT
+            )
+        except asyncio.TimeoutError:
+            log.warning("usage-cost command timed out")
+            return
+        except FileNotFoundError:
+            log.warning("openclaw CLI not found — skipping usage-cost sync")
+            return
+
+        if proc.returncode != 0:
+            log.warning("usage-cost failed (exit %d): %s",
+                        proc.returncode, stderr.decode().strip())
+            return
+
+        try:
+            data = json.loads(stdout.decode())
+        except (json.JSONDecodeError, ValueError):
+            log.warning("Could not parse usage-cost output as JSON")
+            return
+
+        daily = data.get("daily", [])
+        if not daily:
+            log.debug("No daily usage data")
+            return
+
+        upserted = 0
+        for day in daily:
+            date_str = day.get("date")
+            if not date_str:
+                continue
+
+            try:
+                # Deterministic UUID from date string
+                det_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"openclaw-usage-{date_str}"))
+                self.supabase.table("cost_entries").upsert({
+                    "id": det_id,
+                    "agent_id": None,
+                    "cost_type": "variable",
+                    "category": "api_tokens",
+                    "amount": round(day.get("totalCost", 0), 4),
+                    "currency": "USD",
+                    "tokens_used": day.get("totalTokens", 0),
+                    "description": "OpenClaw global usage",
+                    "date": date_str,
+                }, on_conflict="id").execute()
+                upserted += 1
+            except Exception:
+                log.exception("Failed to upsert cost entry for %s", date_str)
+
+        if upserted:
+            log.info("Upserted %d cost entries", upserted)
+
+
+    # ------------------------------------------------------------------
+    # Loop E: sync crons → cron_schedule (5min)
+    # ------------------------------------------------------------------
+    async def _sync_crons_loop(self):
+        while self.running:
+            try:
+                await self._sync_crons()
+            except Exception:
+                log.exception("Error in sync_crons")
+            await asyncio.sleep(CRON_SYNC_INTERVAL)
+
+    async def _sync_crons(self):
+        if self.dry_run:
+            log.info("[DRY-RUN] Would run: openclaw cron list --json")
+            return
+
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "openclaw", "cron", "list", "--json",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(), timeout=COMMAND_TIMEOUT
+            )
+        except asyncio.TimeoutError:
+            log.warning("cron list timed out")
+            return
+        except FileNotFoundError:
+            log.warning("openclaw CLI not found — skipping cron sync")
+            return
+
+        if proc.returncode != 0:
+            log.warning("cron list failed (exit %d): %s",
+                        proc.returncode, stderr.decode().strip())
+            return
+
+        try:
+            data = json.loads(stdout.decode())
+        except (json.JSONDecodeError, ValueError):
+            log.warning("Could not parse cron list output as JSON")
+            return
+
+        crons = data if isinstance(data, list) else (data.get("crons") or data.get("jobs") or [])
+        if not crons:
+            log.debug("No crons in list output")
+            return
+
+        upserted = 0
+        seen_ids = set()
+        for cron in crons:
+            cron_id = cron.get("id") or cron.get("cronId")
+            if not cron_id:
+                continue
+
+            seen_ids.add(cron_id)
+            agent_id = cron.get("agentId") or cron.get("agent_id")
+            schedule = cron.get("schedule", {})
+            state = cron.get("state", {})
+
+            det_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"openclaw-cron-{cron_id}"))
+
+            row = {
+                "id": det_id,
+                "name": cron.get("name", cron_id),
+                "description": cron.get("description"),
+                "cron_expression": schedule.get("expr", "") if isinstance(schedule, dict) else str(schedule),
+                "agent_id": agent_id,
+                "action_type": cron.get("action") or "cron_job",
+                "enabled": cron.get("enabled", True),
+                "payload": {"openclaw_cron_id": cron_id, "schedule": schedule, "state": state},
+                "last_run_at": (
+                    datetime.fromtimestamp(state["lastRunAtMs"] / 1000, tz=timezone.utc).isoformat()
+                    if state.get("lastRunAtMs") else None
+                ),
+                "last_run_status": state.get("lastRunStatus") or state.get("lastStatus"),
+                "next_run_at": (
+                    datetime.fromtimestamp(state["nextRunAtMs"] / 1000, tz=timezone.utc).isoformat()
+                    if state.get("nextRunAtMs") else None
+                ),
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }
+
+            try:
+                self.supabase.table("cron_schedule").upsert(row, on_conflict="id").execute()
+                upserted += 1
+            except Exception:
+                log.exception("Failed to upsert cron %s", cron_id)
+
+        if upserted:
+            log.info("Synced %d cron(s) to cron_schedule", upserted)
 
 
 # ---------------------------------------------------------------------------
