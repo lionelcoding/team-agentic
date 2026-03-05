@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useMemo, useEffect } from "react"
+import { useState, useMemo, useEffect, useCallback } from "react"
 import { Settings2, Radio, Loader2 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { SignalTabNav } from "./signal-tab-nav"
@@ -8,8 +8,47 @@ import { SignalFilters, type FilterState } from "./signal-filters"
 import { SignalCard } from "./signal-card"
 import { SignalStatsSidebar } from "./signal-stats-sidebar"
 import { SignalPlaceholderTab } from "./signal-placeholder-tab"
-import type { SignalItem, SignalTab } from "@/lib/signal-data"
-import { getSignalItems } from "@/lib/supabase/queries"
+import type { SignalItem, SignalSource, SignalImpact, SignalStatus, SignalTab } from "@/lib/signal-data"
+import { createClient } from "@/lib/supabase/client"
+
+// DB → Frontend mapping (duplicated from queries.ts to avoid module-level createClient)
+const IMPACT_MAP: Record<string, SignalImpact> = {
+  fort: "HIGH", moyen: "MEDIUM", faible: "LOW", opportunite: "HIGH",
+}
+const SIGNAL_STATUS_MAP: Record<string, SignalStatus> = {
+  raw: "pending", tagged: "pending", indispensable: "pending", borderline: "pending",
+  approved: "approved", rejected: "rejected",
+  dispatched: "dispatched", applied: "dispatched", archived: "rejected",
+}
+const PLATFORM_SOURCE_MAP: Record<string, SignalSource> = {
+  twitter: "Twitter", reddit: "Reddit", youtube: "YouTube", linkedin: "LinkedIn",
+  rss: "RSS", blog: "RSS", google_news: "RSS", github: "RSS", other: "RSS",
+  legifrance: "RSS", insee: "RSS", arxiv: "RSS", bodacc: "RSS",
+  pappers: "RSS", pages_jaunes: "RSS", competitor: "RSS",
+  job_board: "LinkedIn", producthunt: "RSS",
+}
+const SUBCATEGORY_TAB_MAP: Record<string, SignalTab> = {
+  knowledge: "knowledge", strategy: "strategy", outbound_inbound: "outbound",
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function mapDbSignalToFrontend(row: any): SignalItem {
+  return {
+    id: row.id,
+    tab: SUBCATEGORY_TAB_MAP[row.subcategory] || "knowledge",
+    source: PLATFORM_SOURCE_MAP[row.source_platform] || "RSS",
+    sourceHandle: row.source_platform || "unknown",
+    impact: IMPACT_MAP[row.impact_level] || "MEDIUM",
+    status: SIGNAL_STATUS_MAP[row.status] || "pending",
+    title: row.title,
+    content: row.summary,
+    url: row.source_url || "#",
+    company: row.company_data && Object.keys(row.company_data).length > 0
+      ? { name: row.company_data.name || "", sector: row.company_data.sector || "" }
+      : undefined,
+    createdAt: new Date(row.created_at),
+  }
+}
 
 export function SignalPage() {
   const [activeTab, setActiveTab] = useState<SignalTab>("knowledge")
@@ -22,36 +61,88 @@ export function SignalPage() {
     dateRange: "24h",
   })
 
-  useEffect(() => {
-    async function fetchSignals() {
-      try {
-        const items = await getSignalItems()
-        setSignals(items)
-      } catch (err) {
-        console.error("Failed to fetch signals:", err)
-      } finally {
-        setLoading(false)
+  const fetchSignals = useCallback(async () => {
+    try {
+      const supabase = createClient()
+      const { data, error } = await supabase
+        .from("signal_items")
+        .select("*")
+        .order("created_at", { ascending: false })
+
+      if (error) {
+        console.error("Error fetching signals:", error)
+        return
       }
+      setSignals((data || []).map(mapDbSignalToFrontend))
+    } catch (err) {
+      console.error("Failed to fetch signals:", err)
+    } finally {
+      setLoading(false)
     }
-    fetchSignals()
   }, [])
 
-  const knowledgeSignals = useMemo(
-    () => signals.filter((s) => s.tab === "knowledge"),
-    [signals],
+  useEffect(() => {
+    fetchSignals()
+  }, [fetchSignals])
+
+  // Realtime subscription
+  useEffect(() => {
+    const supabase = createClient()
+    const channel = supabase
+      .channel("signals-realtime")
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "signal_items" },
+        () => { fetchSignals() }
+      )
+      .subscribe()
+
+    return () => {
+      supabase.removeChannel(channel)
+    }
+  }, [fetchSignals])
+
+  const tabCounts = useMemo(() => {
+    return {
+      knowledge: signals.filter((s) => s.tab === "knowledge").length,
+      strategy: signals.filter((s) => s.tab === "strategy").length,
+      outbound: signals.filter((s) => s.tab === "outbound").length,
+    }
+  }, [signals])
+
+  const tabSignals = useMemo(
+    () => signals.filter((s) => s.tab === activeTab),
+    [signals, activeTab],
   )
 
   const filteredSignals = useMemo(() => {
-    return knowledgeSignals.filter((s) => {
+    return tabSignals.filter((s) => {
       if (filters.sources.length > 0 && !filters.sources.includes(s.source)) return false
       if (filters.impacts.length > 0 && !filters.impacts.includes(s.impact)) return false
       if (filters.status !== "all" && s.status !== filters.status) return false
       return true
     })
-  }, [knowledgeSignals, filters])
+  }, [tabSignals, filters])
 
-  const handleStatusChange = (id: string, status: SignalItem["status"]) => {
-    setSignals((prev) => prev.map((s) => (s.id === id ? { ...s, status } : s)))
+  const handleStatusChange = async (id: string, status: string, dispatchedTo?: string) => {
+    try {
+      const body: Record<string, unknown> = { status }
+      if (dispatchedTo) body.dispatched_to = dispatchedTo
+
+      const res = await fetch(`/api/signals/${id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      })
+
+      if (!res.ok) {
+        const err = await res.json()
+        console.error("Failed to update signal:", err)
+      }
+      // Realtime will handle the UI update
+    } catch (err) {
+      console.error("Failed to update signal:", err)
+    }
   }
 
   if (loading) {
@@ -74,7 +165,7 @@ export function SignalPage() {
           <div>
             <h1 className="text-xl font-bold text-slate-50 leading-tight">Signal</h1>
             <p className="text-xs text-slate-500">
-              Module de veille marché · {knowledgeSignals.length} signaux Knowledge
+              Module de veille marché · {signals.length} signaux
             </p>
           </div>
         </div>
@@ -90,24 +181,26 @@ export function SignalPage() {
 
       {/* Tab navigation */}
       <div className="px-6">
-        <SignalTabNav activeTab={activeTab} onChange={setActiveTab} />
+        <SignalTabNav activeTab={activeTab} onChange={setActiveTab} counts={tabCounts} />
       </div>
 
       {/* Tab content */}
-      {activeTab !== "knowledge" ? (
+      {activeTab !== "knowledge" && tabSignals.length === 0 ? (
         <div className="px-6 py-6">
           <SignalPlaceholderTab tab={activeTab} />
         </div>
       ) : (
         <div className="flex flex-col gap-5 px-6 py-5 flex-1">
-          {/* Knowledge header */}
+          {/* Tab header */}
           <div className="flex items-center justify-between gap-4 flex-wrap">
             <div>
               <h2 className="text-base font-semibold text-slate-100">
-                Veille Marché {"&"} Technologique
+                {activeTab === "knowledge" && "Veille Marché & Technologique"}
+                {activeTab === "strategy" && "Signaux Stratégiques"}
+                {activeTab === "outbound" && "Outbound / Inbound"}
               </h2>
               <p className="text-xs text-slate-500 mt-0.5">
-                {filteredSignals.length} signal{filteredSignals.length !== 1 ? "s" : ""} affichés
+                {filteredSignals.length} signal{filteredSignals.length !== 1 ? "s" : ""} affiché{filteredSignals.length !== 1 ? "s" : ""}
               </p>
             </div>
           </div>
@@ -148,7 +241,7 @@ export function SignalPage() {
             </div>
 
             {/* Stats sidebar */}
-            <SignalStatsSidebar signals={knowledgeSignals} />
+            <SignalStatsSidebar signals={tabSignals} />
           </div>
         </div>
       )}

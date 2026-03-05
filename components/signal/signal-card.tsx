@@ -55,7 +55,7 @@ const STATUS_CONFIG = {
 
 interface SignalCardProps {
   signal: SignalItem
-  onStatusChange: (id: string, status: SignalItem["status"]) => void
+  onStatusChange: (id: string, status: string, dispatchedTo?: string) => void
 }
 
 export function SignalCard({ signal, onStatusChange }: SignalCardProps) {
@@ -63,11 +63,13 @@ export function SignalCard({ signal, onStatusChange }: SignalCardProps) {
   const impact = IMPACT_CONFIG[signal.impact]
   const statusCfg = STATUS_CONFIG[signal.status]
 
-  const handleAction = async (newStatus: SignalItem["status"]) => {
+  const handleAction = async (newStatus: string, dispatchedTo?: string) => {
     setIsUpdating(true)
-    await new Promise((r) => setTimeout(r, 400))
-    onStatusChange(signal.id, newStatus)
-    setIsUpdating(false)
+    try {
+      await onStatusChange(signal.id, newStatus, dispatchedTo)
+    } finally {
+      setIsUpdating(false)
+    }
   }
 
   return (
@@ -107,16 +109,18 @@ export function SignalCard({ signal, onStatusChange }: SignalCardProps) {
       )}
 
       {/* URL */}
-      <a
-        href={signal.url}
-        target="_blank"
-        rel="noopener noreferrer"
-        className="flex items-center gap-1 text-xs text-blue-400 hover:text-blue-300 transition-colors w-fit"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <ExternalLink size={11} />
-        <span className="truncate max-w-[220px]">Voir la source</span>
-      </a>
+      {signal.url && signal.url !== '#' && (
+        <a
+          href={signal.url}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="flex items-center gap-1 text-xs text-blue-400 hover:text-blue-300 transition-colors w-fit"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <ExternalLink size={11} />
+          <span className="truncate max-w-[220px]">Voir la source</span>
+        </a>
+      )}
 
       {/* Divider */}
       <div className="border-t border-slate-800" />
@@ -192,7 +196,7 @@ export function SignalCard({ signal, onStatusChange }: SignalCardProps) {
                     <DropdownMenuItem
                       key={agent.id}
                       className="text-xs hover:bg-slate-800 cursor-pointer gap-2"
-                      onClick={() => handleAction("dispatched")}
+                      onClick={() => handleAction("dispatched", agent.id)}
                     >
                       <span className="w-5 h-5 rounded-full bg-blue-600/30 text-blue-400 flex items-center justify-center text-[10px] font-bold shrink-0">
                         {agent.name[0]}
@@ -213,7 +217,7 @@ export function SignalCard({ signal, onStatusChange }: SignalCardProps) {
               size="sm"
               variant="ghost"
               disabled={isUpdating}
-              onClick={() => handleAction("pending")}
+              onClick={() => handleAction("tagged")}
               className="h-7 px-2.5 text-xs text-slate-400 hover:text-slate-200 hover:bg-slate-800 border border-slate-700"
             >
               Remettre en attente

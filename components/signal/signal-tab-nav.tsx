@@ -2,7 +2,6 @@
 
 import { BookOpen, Target, TrendingUp } from "lucide-react"
 import type { SignalTab } from "@/lib/signal-data"
-import { TAB_COUNTS } from "@/lib/signal-data"
 
 const TABS: { id: SignalTab; label: string; icon: React.ElementType }[] = [
   { id: "knowledge", label: "Knowledge", icon: BookOpen },
@@ -13,9 +12,10 @@ const TABS: { id: SignalTab; label: string; icon: React.ElementType }[] = [
 interface SignalTabNavProps {
   activeTab: SignalTab
   onChange: (tab: SignalTab) => void
+  counts: Record<SignalTab, number>
 }
 
-export function SignalTabNav({ activeTab, onChange }: SignalTabNavProps) {
+export function SignalTabNav({ activeTab, onChange, counts }: SignalTabNavProps) {
   return (
     <div className="flex items-center gap-0 border-b border-slate-800">
       {TABS.map((tab) => {
@@ -40,7 +40,7 @@ export function SignalTabNav({ activeTab, onChange }: SignalTabNavProps) {
                   : "bg-slate-800 text-slate-500"
               }`}
             >
-              {TAB_COUNTS[tab.id]}
+              {counts[tab.id]}
             </span>
             {isActive && (
               <span className="absolute bottom-0 left-0 right-0 h-0.5 bg-blue-500 rounded-t-full" />

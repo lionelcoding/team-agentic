@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """sync-daemon.py — Bridge between Supabase gateway_commands and OpenClaw CLI.
 
-Runs five concurrent loops:
+Runs six concurrent loops:
   A) poll_commands      — every 5s, picks up pending commands and executes them
   B) sync_agent_status  — every 30s, reads OpenClaw health and updates agents table
-  C) parse_sessions     — every 60s, parses JSONL session files → agent_actions
+  C) parse_sessions     — every 60s, parses JSONL session files → agent_actions + signal_items
   D) push_usage_cost    — every 5min, reads openclaw usage-cost → cost_entries
   E) sync_crons         — every 5min, reads openclaw cron list → cron_schedule
+  F) process_signals    — every 5min, classifies raw signals → tagged
 
 Pattern DA-6 "sortant uniquement": all connections are outbound from VPS to Supabase.
 """
@@ -23,6 +24,7 @@ import subprocess
 import sys
 import uuid
 from datetime import datetime, timezone
+from urllib.parse import urlparse
 
 from dotenv import load_dotenv
 from supabase import create_client, Client
@@ -36,10 +38,55 @@ COMMAND_TIMEOUT = 60          # seconds
 JSONL_PARSE_INTERVAL = 60    # seconds — Loop C
 USAGE_COST_INTERVAL = 300    # seconds — Loop D (5 min)
 CRON_SYNC_INTERVAL = 300     # seconds — Loop E (5 min)
+SIGNAL_PROCESS_INTERVAL = 300  # seconds — Loop F (5 min)
 
 # Session JSONL parsing
 SESSIONS_BASE = "/root/.openclaw/agents"
 CURSOR_FILE = "/tmp/sync-daemon-cursors.json"
+SIGNAL_CURSOR_FILE = "/tmp/sync-daemon-signal-cursors.json"
+
+# Agents whose sessions can produce signals
+SIGNAL_AGENTS = {"research", "main"}
+
+# Tool call names that may contain signal URLs
+SIGNAL_TOOL_NAMES = {"web_search", "brave_search", "read_url", "fetch_url", "bash"}
+
+# Domain → platform mapping for signals
+DOMAIN_PLATFORM_MAP = {
+    "twitter.com": "twitter", "x.com": "twitter",
+    "linkedin.com": "linkedin",
+    "reddit.com": "reddit",
+    "youtube.com": "youtube", "youtu.be": "youtube",
+    "github.com": "github",
+    "arxiv.org": "arxiv",
+    "legifrance.gouv.fr": "legifrance",
+    "producthunt.com": "producthunt",
+}
+
+# Keyword-based classification rules for signals
+SIGNAL_CLASSIFICATION_RULES = {
+    "subcategory": {
+        "legal": ["rgpd", "gdpr", "cnil", "legal", "juridique", "loi", "réglementation", "compliance"],
+        "competitor": ["concurrent", "competitor", "concurrence", "benchmark", "vs ", "versus", "alternative"],
+        "market": ["funding", "levée", "fundraise", "acquisition", "ipo", "marché", "market", "tendance", "trend"],
+        "seo": ["seo", "google", "serp", "search engine", "référencement", "backlink"],
+        "tech": ["ai", "ia", "llm", "gpt", "claude", "machine learning", "deep learning", "tech", "api", "saas"],
+    },
+    "impact_for_subcategory": {
+        "legal": "fort",
+        "competitor": "fort",
+        "market": "moyen",
+        "seo": "moyen",
+        "tech": "moyen",
+    },
+    "score_for_subcategory": {
+        "legal": 70,
+        "competitor": 80,
+        "market": 60,
+        "seo": 50,
+        "tech": 60,
+    },
+}
 
 # Command map: name → callable(agent_id, payload) → list of CLI args
 COMMANDS: dict[str, callable] = {
@@ -247,6 +294,7 @@ class SyncDaemon:
             self._parse_sessions_loop(),
             self._push_usage_cost_loop(),
             self._sync_crons_loop(),
+            self._process_signals_loop(),
         )
         log.info("Sync daemon stopped")
 
@@ -338,6 +386,10 @@ class SyncDaemon:
                 raise ValueError("deprovision_agent requires agent_id")
             return self._deprovision_agent(agent_id)
 
+        # Ingest signal — handled locally, INSERT into signal_items
+        if command == "ingest_signal":
+            return self._ingest_signal(agent_id, payload)
+
         # File commands — handled locally, no CLI
         if command in ("list_files", "read_file", "write_file"):
             return self._handle_file_command(command, agent_id, payload)
@@ -351,6 +403,41 @@ class SyncDaemon:
 
         cli_args = COMMANDS[command](agent_id, payload)
         return await self._run_cli(cli_args, label=command)
+
+    # ------------------------------------------------------------------
+    # Ingest signal (local, no CLI)
+    # ------------------------------------------------------------------
+    def _ingest_signal(self, agent_id: str | None, payload: dict) -> dict:
+        """Insert a signal directly into signal_items from an external source."""
+        title = payload.get("title")
+        if not title:
+            raise ValueError("ingest_signal requires payload.title")
+
+        det_id = str(uuid.uuid5(
+            uuid.NAMESPACE_DNS,
+            f"ingest-{title[:100]}-{payload.get('source_url', '')[:100]}"
+        ))
+
+        row = {
+            "id": det_id,
+            "title": title[:255],
+            "summary": payload.get("summary", "")[:2000],
+            "source_url": payload.get("source_url", ""),
+            "source_platform": payload.get("source_platform", "other"),
+            "subcategory": payload.get("subcategory", "seo"),
+            "impact_level": payload.get("impact_level", "moyen"),
+            "relevance_score": payload.get("relevance_score", 50),
+            "status": "raw",
+            "agent_id": agent_id,
+        }
+
+        if self.dry_run:
+            log.info("[DRY-RUN] Would ingest signal: %s", title)
+            return {"dry_run": True, "signal_id": det_id}
+
+        self.supabase.table("signal_items").upsert(row, on_conflict="id").execute()
+        log.info("Ingested signal: %s (id=%s)", title, det_id)
+        return {"signal_id": det_id, "title": title, "status": "raw"}
 
     # ------------------------------------------------------------------
     # File commands (local filesystem, no CLI)
@@ -568,6 +655,17 @@ class SyncDaemon:
         with open(CURSOR_FILE, "w") as f:
             json.dump(cursors, f)
 
+    def _load_signal_cursors(self) -> dict:
+        try:
+            with open(SIGNAL_CURSOR_FILE, "r") as f:
+                return json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            return {}
+
+    def _save_signal_cursors(self, cursors: dict):
+        with open(SIGNAL_CURSOR_FILE, "w") as f:
+            json.dump(cursors, f)
+
     # ------------------------------------------------------------------
     # Loop C: parse sessions JSONL → agent_actions (60s)
     # ------------------------------------------------------------------
@@ -589,7 +687,9 @@ class SyncDaemon:
             return
 
         cursors = self._load_cursors()
+        signal_cursors = self._load_signal_cursors()
         total_inserted = 0
+        total_signals = 0
 
         for agent_id in sorted(KNOWN_AGENTS):
             sessions_dir = os.path.join(SESSIONS_BASE, agent_id, "sessions")
@@ -597,6 +697,7 @@ class SyncDaemon:
                 continue
 
             agent_cursors = cursors.get(agent_id, {})
+            agent_signal_cursors = signal_cursors.get(agent_id, {})
             agent_inserted = 0
 
             for fname in os.listdir(sessions_dir):
@@ -631,17 +732,50 @@ class SyncDaemon:
                     log.exception("Failed to insert %d actions for %s/%s",
                                   len(actions), agent_id, session_id)
 
+                # Extract signals for signal-producing agents
+                if agent_id in SIGNAL_AGENTS:
+                    signal_last_line = agent_signal_cursors.get(session_id, 0)
+                    try:
+                        new_signals = self._extract_signals_from_session(
+                            fpath, agent_id, session_id, signal_last_line
+                        )
+                    except Exception:
+                        log.exception("Failed to extract signals from %s", fpath)
+                        new_signals = []
+
+                    if new_signals:
+                        try:
+                            self.supabase.table("signal_items").upsert(
+                                new_signals, on_conflict="id"
+                            ).execute()
+                            total_signals += len(new_signals)
+                        except Exception:
+                            log.exception("Failed to upsert %d signals for %s/%s",
+                                          len(new_signals), agent_id, session_id)
+
+                    # Update signal cursor to current file length
+                    try:
+                        with open(fpath, "r") as f:
+                            line_count = sum(1 for _ in f)
+                        agent_signal_cursors[session_id] = line_count
+                    except Exception:
+                        pass
+
             if agent_inserted:
                 log.info("Parsed %d actions from agent %s", agent_inserted, agent_id)
 
             cursors[agent_id] = agent_cursors
+            signal_cursors[agent_id] = agent_signal_cursors
             total_inserted += agent_inserted
 
         self._save_cursors(cursors)
+        self._save_signal_cursors(signal_cursors)
         if total_inserted:
             log.info("Total: inserted %d agent_actions", total_inserted)
             # Aggregate costs per agent after new actions
             await self._aggregate_agent_costs()
+        if total_signals:
+            log.info("Total: upserted %d signal_items", total_signals)
 
     def _extract_actions_from_jsonl(
         self, fpath: str, agent_id: str, session_id: str, skip_lines: int
@@ -712,6 +846,151 @@ class SyncDaemon:
                 })
 
         return actions
+
+    # ------------------------------------------------------------------
+    # Signal extraction from sessions (called in Loop C for research/main)
+    # ------------------------------------------------------------------
+    def _extract_signals_from_session(
+        self, fpath: str, agent_id: str, session_id: str, skip_lines: int
+    ) -> list[dict]:
+        """Extract signal items from tool_calls in JSONL sessions for signal-producing agents."""
+        signals = []
+        line_num = 0
+        tool_call_index = 0
+        last_assistant_text = ""
+
+        with open(fpath, "r", encoding="utf-8") as f:
+            for raw_line in f:
+                line_num += 1
+                if line_num <= skip_lines:
+                    continue
+
+                raw_line = raw_line.strip()
+                if not raw_line:
+                    continue
+
+                try:
+                    entry = json.loads(raw_line)
+                except json.JSONDecodeError:
+                    continue
+
+                if entry.get("type") != "message":
+                    continue
+
+                msg = entry.get("message", {})
+                if msg.get("role") != "assistant":
+                    continue
+
+                content = msg.get("content", [])
+
+                # Collect text blocks as potential summary
+                text_parts = []
+                for block in content:
+                    if block.get("type") == "text":
+                        text_parts.append(block.get("text", ""))
+
+                tool_calls = [c for c in content if c.get("type") == "toolCall"]
+                if not tool_calls:
+                    if text_parts:
+                        last_assistant_text = " ".join(text_parts)
+                    continue
+
+                for tc in tool_calls:
+                    tool_name = tc.get("name", "")
+                    if tool_name not in SIGNAL_TOOL_NAMES:
+                        tool_call_index += 1
+                        continue
+
+                    args = tc.get("arguments", {})
+                    args_str = json.dumps(args) if isinstance(args, dict) else str(args)
+
+                    # Extract URL from arguments
+                    url = self._extract_url_from_args(args, args_str)
+                    if not url:
+                        tool_call_index += 1
+                        continue
+
+                    # Extract title from arguments or tool result
+                    title = self._extract_title_from_args(args, tool_name)
+                    if not title:
+                        title = url[:120]
+
+                    # Summary from following assistant text or args
+                    summary = last_assistant_text[:500] if last_assistant_text else args_str[:500]
+
+                    # Platform from domain
+                    platform = self._platform_from_url(url)
+
+                    # Deterministic UUID
+                    det_id = str(uuid.uuid5(
+                        uuid.NAMESPACE_DNS,
+                        f"signal-{session_id}-{tool_call_index}"
+                    ))
+
+                    signals.append({
+                        "id": det_id,
+                        "title": title[:255],
+                        "summary": summary,
+                        "source_url": url[:2000],
+                        "source_platform": platform,
+                        "subcategory": "seo",
+                        "impact_level": "moyen",
+                        "relevance_score": 50,
+                        "status": "raw",
+                        "agent_id": agent_id,
+                    })
+
+                    tool_call_index += 1
+
+                if text_parts:
+                    last_assistant_text = " ".join(text_parts)
+
+        return signals
+
+    def _extract_url_from_args(self, args: dict, args_str: str) -> str | None:
+        """Try to extract a URL from tool call arguments."""
+        # Direct URL fields
+        for key in ("url", "uri", "href", "link", "source"):
+            if key in args and isinstance(args[key], str) and args[key].startswith("http"):
+                return args[key]
+
+        # Search query — not a URL, skip
+        if "query" in args and "url" not in args_str.lower():
+            return None
+
+        # Bash command with curl/wget
+        if "command" in args:
+            cmd = args["command"]
+            if isinstance(cmd, str) and ("curl" in cmd or "wget" in cmd):
+                url_match = re.search(r'https?://[^\s"\']+', cmd)
+                if url_match:
+                    return url_match.group(0)
+
+        # Fallback: find URL anywhere in args
+        url_match = re.search(r'https?://[^\s"\'<>]+', args_str)
+        if url_match:
+            return url_match.group(0)
+
+        return None
+
+    def _extract_title_from_args(self, args: dict, tool_name: str) -> str | None:
+        """Try to extract a title from tool call arguments."""
+        for key in ("title", "name", "query", "search_query"):
+            if key in args and isinstance(args[key], str):
+                return args[key]
+        return None
+
+    def _platform_from_url(self, url: str) -> str:
+        """Map URL domain to platform name."""
+        try:
+            hostname = urlparse(url).hostname or ""
+            hostname = hostname.lstrip("www.")
+            for domain, platform in DOMAIN_PLATFORM_MAP.items():
+                if domain in hostname:
+                    return platform
+        except Exception:
+            pass
+        return "other"
 
     # ------------------------------------------------------------------
     # Per-agent cost aggregation (called after JSONL parse)
@@ -942,6 +1221,67 @@ class SyncDaemon:
 
         if upserted:
             log.info("Synced %d cron(s) to cron_schedule", upserted)
+
+    # ------------------------------------------------------------------
+    # Loop F: auto-classify raw signals (5min)
+    # ------------------------------------------------------------------
+    async def _process_signals_loop(self):
+        while self.running:
+            try:
+                await self._process_raw_signals()
+            except Exception:
+                log.exception("Error in process_signals")
+            await asyncio.sleep(SIGNAL_PROCESS_INTERVAL)
+
+    async def _process_raw_signals(self):
+        if self.dry_run:
+            log.info("[DRY-RUN] Would process raw signals")
+            return
+
+        try:
+            resp = self.supabase.table("signal_items") \
+                .select("*") \
+                .eq("status", "raw") \
+                .order("created_at") \
+                .limit(20) \
+                .execute()
+        except Exception:
+            log.exception("Failed to query raw signals")
+            return
+
+        signals = resp.data or []
+        if not signals:
+            return
+
+        rules = SIGNAL_CLASSIFICATION_RULES
+        updated = 0
+
+        for sig in signals:
+            text = f"{sig.get('title', '')} {sig.get('summary', '')}".lower()
+
+            # Classify subcategory by keyword matching
+            subcategory = sig.get("subcategory", "seo")
+            for cat, keywords in rules["subcategory"].items():
+                if any(kw in text for kw in keywords):
+                    subcategory = cat
+                    break
+
+            impact_level = rules["impact_for_subcategory"].get(subcategory, "faible")
+            relevance_score = rules["score_for_subcategory"].get(subcategory, 40)
+
+            try:
+                self.supabase.table("signal_items").update({
+                    "status": "tagged",
+                    "subcategory": subcategory,
+                    "impact_level": impact_level,
+                    "relevance_score": relevance_score,
+                }).eq("id", sig["id"]).execute()
+                updated += 1
+            except Exception:
+                log.exception("Failed to update signal %s", sig["id"])
+
+        if updated:
+            log.info("Classified %d raw signals → tagged", updated)
 
 
 # ---------------------------------------------------------------------------
