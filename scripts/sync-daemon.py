@@ -50,9 +50,9 @@ COMMANDS: dict[str, callable] = {
     "list_crons": lambda _, __: ["openclaw", "cron", "list", "--json"],
     "run_cron":   lambda _, p: ["openclaw", "cron", "run", p.get("cron_id", ""), "--json"],
     "toggle_cron": lambda _, p: ["openclaw", "cron", "enable" if p.get("enabled") else "disable", p.get("cron_id", "")],
-    "create_cron": lambda aid, p: ["openclaw", "cron", "add", "--agent", aid or p.get("agent_id", ""), "--name", p.get("name", ""), "--schedule", p.get("schedule_expr", ""), "--json"],
-    "update_cron": lambda _, p: ["openclaw", "cron", "update", p.get("cron_id", "")] + (["--name", p["name"]] if p.get("name") else []) + (["--schedule", p["schedule_expr"]] if p.get("schedule_expr") else []) + ["--json"],
-    "delete_cron": lambda _, p: ["openclaw", "cron", "remove", p.get("cron_id", ""), "--json"],
+    "create_cron": lambda aid, p: ["openclaw", "cron", "add", "--agent", aid or p.get("agent_id", ""), "--name", p.get("name", ""), "--cron", p.get("schedule_expr", ""), "--message", p.get("description", p.get("name", "scheduled task"))] + ["--json"],
+    "update_cron": lambda _, p: ["openclaw", "cron", "edit", p.get("cron_id", "")] + (["--name", p["name"]] if p.get("name") else []) + (["--cron", p["schedule_expr"]] if p.get("schedule_expr") else []) + (["--description", p["description"]] if p.get("description") else []) + ["--json"],
+    "delete_cron": lambda _, p: ["openclaw", "cron", "rm", p.get("cron_id", ""), "--json"],
 }
 
 # Agent IDs that exist on the VPS
@@ -906,15 +906,25 @@ class SyncDaemon:
 
             det_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"openclaw-cron-{cron_id}"))
 
+            # Validate period against DB CHECK constraint
+            VALID_PERIODS = {"morning", "day", "evening", "night", "every_15min", "daily", "weekly"}
+            raw_period = schedule.get("kind") if isinstance(schedule, dict) else None
+            period = raw_period if raw_period in VALID_PERIODS else None
+
+            # Validate wake_mode against DB CHECK constraint
+            VALID_WAKE_MODES = {"now", "next-heartbeat", "isolated"}
+            raw_wake = cron.get("wakeMode")
+            wake_mode = raw_wake if raw_wake in VALID_WAKE_MODES else None
+
             row = {
                 "id": det_id,
-                "agent_id": agent_id,
+                "agent_id": agent_id or None,
                 "cron_expression": schedule.get("expr", "") if isinstance(schedule, dict) else str(schedule),
                 "time_label": cron.get("name", cron_id),
-                "period": schedule.get("kind") if isinstance(schedule, dict) else None,
+                "period": period,
                 "task_description": cron.get("description"),
                 "gateway_message": cron.get("gatewayMessage"),
-                "wake_mode": cron.get("wakeMode"),
+                "wake_mode": wake_mode,
                 "deliver_telegram": cron.get("deliverTelegram", False),
                 "enabled": cron.get("enabled", True),
                 "last_run_at": (
