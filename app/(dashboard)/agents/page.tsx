@@ -1,8 +1,8 @@
 "use client"
 
 import { useState, useEffect, useRef } from "react"
-import { Bot, Search, Power, PowerOff, RotateCcw, Loader2, Terminal, Tag, Brain, Hash, ExternalLink } from "lucide-react"
-import Link from "next/link"
+import { useRouter } from "next/navigation"
+import { Bot, Search, Power, PowerOff, RotateCcw, Loader2, Terminal, Tag, Brain, Hash } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { createClient } from "@/lib/supabase/client"
 import { useGatewayCommand } from "@/hooks/useGatewayCommand"
@@ -69,7 +69,7 @@ function CommandButton({
 
   return (
     <button
-      onClick={() => sendCommand(command, agentId)}
+      onClick={(e) => { e.stopPropagation(); sendCommand(command, agentId) }}
       disabled={isLoading}
       title={error ? `Erreur: ${error}` : status === "done" ? "Commande envoyee" : label}
       className={cn(
@@ -92,6 +92,7 @@ function CommandButton({
 }
 
 export default function AgentsPage() {
+  const router = useRouter()
   const [agents, setAgents] = useState<DbAgent[]>([])
   const [loading, setLoading] = useState(true)
   const [search, setSearch] = useState("")
@@ -192,11 +193,12 @@ export default function AgentsPage() {
         {filtered.map((agent) => (
           <div
             key={agent.id}
-            className="bg-slate-800/50 border border-slate-700/50 rounded-xl p-5 hover:border-blue-500/30 transition-all"
+            onClick={() => router.push(`/agents/${agent.id}`)}
+            className="bg-slate-800/50 border border-slate-700/50 rounded-xl p-5 hover:border-blue-500/30 transition-all cursor-pointer"
           >
             {/* Top: Name + Status */}
             <div className="flex items-start justify-between mb-3">
-              <Link href={`/agents/${agent.id}`} className="flex items-center gap-3 group">
+              <div className="flex items-center gap-3">
                 <div className={cn(
                   "w-11 h-11 rounded-full bg-gradient-to-br flex items-center justify-center text-sm font-bold text-white shrink-0",
                   getTagColor(agent.tags?.[0] || "").avatar
@@ -204,13 +206,10 @@ export default function AgentsPage() {
                   {agent.name.substring(0, 2).toUpperCase()}
                 </div>
                 <div>
-                  <h3 className="text-white font-semibold group-hover:text-blue-400 transition-colors flex items-center gap-1.5">
-                    {agent.name}
-                    <ExternalLink className="w-3 h-3 opacity-0 group-hover:opacity-100 transition-opacity" />
-                  </h3>
+                  <h3 className="text-white font-semibold">{agent.name}</h3>
                   <p className="text-xs text-slate-400">{agent.role}</p>
                 </div>
-              </Link>
+              </div>
               <StatusDot status={agent.status} />
             </div>
 

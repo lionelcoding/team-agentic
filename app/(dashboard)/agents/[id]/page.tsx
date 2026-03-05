@@ -47,11 +47,17 @@ interface WorkspaceFile {
 interface CronJob {
   id: string
   name: string
-  schedule: string
+  description?: string
+  schedule: { expr: string; tz?: string; kind?: string }
   enabled: boolean
   agentId?: string
-  lastRun?: { status: string; at: string }
-  nextRun?: string
+  state?: {
+    lastStatus?: string
+    lastRunAtMs?: number
+    nextRunAtMs?: number
+    lastRunStatus?: string
+    consecutiveErrors?: number
+  }
 }
 
 const statusConfig: Record<string, { color: string; label: string; pulse: boolean }> = {
@@ -560,16 +566,26 @@ function CronsTab({ agentId }: { agentId: string }) {
           {filtered.map((cron) => (
             <tr key={cron.id} className="border-b border-slate-700/30 last:border-b-0 hover:bg-slate-700/20 transition-colors">
               <td className="px-4 py-3">
-                <span className="text-white font-medium">{cron.name || cron.id}</span>
-                {cron.agentId && (
-                  <span className="ml-2 text-[10px] text-slate-500 bg-slate-700/50 px-1.5 py-0.5 rounded">
-                    {cron.agentId}
-                  </span>
+                <div>
+                  <span className="text-white font-medium">{cron.name || cron.id}</span>
+                  {cron.agentId && (
+                    <span className="ml-2 text-[10px] text-slate-500 bg-slate-700/50 px-1.5 py-0.5 rounded">
+                      {cron.agentId}
+                    </span>
+                  )}
+                </div>
+                {cron.description && (
+                  <p className="text-[11px] text-slate-500 mt-0.5 truncate max-w-xs">{cron.description}</p>
                 )}
               </td>
-              <td className="px-4 py-3 font-mono text-xs text-slate-400">{cron.schedule}</td>
+              <td className="px-4 py-3 font-mono text-xs text-slate-400">{cron.schedule?.expr || "—"}</td>
               <td className="px-4 py-3 text-xs text-slate-400">
-                {cron.lastRun?.at ? new Date(cron.lastRun.at).toLocaleString("fr-FR") : "—"}
+                {cron.state?.lastRunAtMs ? new Date(cron.state.lastRunAtMs).toLocaleString("fr-FR") : "—"}
+                {cron.state?.lastRunStatus && (
+                  <span className={cn("ml-1.5", cron.state.lastRunStatus === "ok" ? "text-emerald-400" : "text-red-400")}>
+                    ({cron.state.lastRunStatus})
+                  </span>
+                )}
               </td>
               <td className="px-4 py-3">
                 <span className={cn(
