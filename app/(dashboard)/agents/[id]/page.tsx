@@ -488,22 +488,63 @@ function CronsTab({ agentId }: { agentId: string }) {
   const [deletingId, setDeletingId] = useState<string | null>(null)
   const [deleteLoading, setDeleteLoading] = useState(false)
 
-  // Fetch from cron_schedule table
+  // Fetch from cron_schedule table, fallback to API if DB is empty
   useEffect(() => {
     const supabase = createClient()
 
     async function fetchCrons() {
       setLoading(true)
       setError(null)
+
+      // Try DB first
       const { data, error: fetchErr } = await supabase
         .from("cron_schedule")
         .select("*")
         .eq("agent_id", agentId)
         .order("time_label")
+
       if (fetchErr) {
         setError(fetchErr.message)
-      } else {
-        setCrons(data || [])
+        setLoading(false)
+        return
+      }
+
+      if (data && data.length > 0) {
+        setCrons(data)
+        setLoading(false)
+        return
+      }
+
+      // Fallback: DB empty → fetch from API (OpenClaw via daemon)
+      try {
+        const res = await fetch("/api/crons")
+        const apiData = await res.json()
+        if (!res.ok) throw new Error(apiData.error)
+        const list = Array.isArray(apiData) ? apiData : (apiData.crons || apiData.jobs || [])
+        // Map OpenClaw format → DbCronSchedule shape
+        const mapped: DbCronSchedule[] = list
+          .filter((c: Record<string, unknown>) => c.agentId === agentId || c.agent_id === agentId)
+          .map((c: Record<string, unknown>) => ({
+            id: (c.id || c.cronId) as string,
+            agent_id: (c.agentId || c.agent_id) as string,
+            cron_expression: ((c.schedule as Record<string, string>)?.expr || c.schedule) as string,
+            time_label: (c.name || c.id) as string,
+            period: null,
+            task_description: (c.description || null) as string | null,
+            gateway_message: null,
+            wake_mode: null,
+            deliver_telegram: false,
+            enabled: c.enabled !== false,
+            last_run_at: (c.state as Record<string, unknown>)?.lastRunAtMs
+              ? new Date((c.state as Record<string, number>).lastRunAtMs).toISOString()
+              : null,
+            last_result: ((c.state as Record<string, unknown>)?.lastRunStatus as string) || null,
+            created_at: new Date().toISOString(),
+          }))
+        setCrons(mapped)
+      } catch {
+        // Both DB and API empty/failed — just show empty state
+        setCrons([])
       }
       setLoading(false)
     }
