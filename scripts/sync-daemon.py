@@ -49,7 +49,7 @@ SIGNAL_CURSOR_FILE = "/tmp/sync-daemon-signal-cursors.json"
 SIGNAL_AGENTS = {"research", "main"}
 
 # Tool call names that may contain signal URLs
-SIGNAL_TOOL_NAMES = {"web_search", "brave_search", "read_url", "fetch_url", "bash"}
+SIGNAL_TOOL_NAMES = {"web_search", "brave_search", "read_url", "fetch_url", "web_fetch", "bash"}
 
 # Domain → platform mapping for signals
 DOMAIN_PLATFORM_MAP = {
@@ -63,23 +63,33 @@ DOMAIN_PLATFORM_MAP = {
     "producthunt.com": "producthunt",
 }
 
+# DB valid subcategories: knowledge, strategy, outbound_inbound
+# Classification maps internal tags → DB subcategory
+SIGNAL_TAG_TO_SUBCATEGORY = {
+    "legal": "strategy",
+    "competitor": "strategy",
+    "market": "knowledge",
+    "seo": "knowledge",
+    "tech": "knowledge",
+}
+
 # Keyword-based classification rules for signals
 SIGNAL_CLASSIFICATION_RULES = {
-    "subcategory": {
+    "tags": {
         "legal": ["rgpd", "gdpr", "cnil", "legal", "juridique", "loi", "réglementation", "compliance"],
         "competitor": ["concurrent", "competitor", "concurrence", "benchmark", "vs ", "versus", "alternative"],
         "market": ["funding", "levée", "fundraise", "acquisition", "ipo", "marché", "market", "tendance", "trend"],
         "seo": ["seo", "google", "serp", "search engine", "référencement", "backlink"],
         "tech": ["ai", "ia", "llm", "gpt", "claude", "machine learning", "deep learning", "tech", "api", "saas"],
     },
-    "impact_for_subcategory": {
+    "impact_for_tag": {
         "legal": "fort",
         "competitor": "fort",
         "market": "moyen",
         "seo": "moyen",
         "tech": "moyen",
     },
-    "score_for_subcategory": {
+    "score_for_tag": {
         "legal": 70,
         "competitor": 80,
         "market": 60,
@@ -428,7 +438,7 @@ class SyncDaemon:
             "impact_level": payload.get("impact_level", "moyen"),
             "relevance_score": payload.get("relevance_score", 50),
             "status": "raw",
-            "agent_id": agent_id,
+            "collected_by": agent_id,
         }
 
         if self.dry_run:
@@ -719,20 +729,18 @@ class SyncDaemon:
                     log.exception("Failed to parse %s", fpath)
                     continue
 
-                if not actions:
-                    continue
+                if actions:
+                    # Batch insert
+                    try:
+                        self.supabase.table("agent_actions").insert(actions).execute()
+                        new_cursor = last_line + len(actions)
+                        agent_cursors[session_id] = new_cursor
+                        agent_inserted += len(actions)
+                    except Exception:
+                        log.exception("Failed to insert %d actions for %s/%s",
+                                      len(actions), agent_id, session_id)
 
-                # Batch insert
-                try:
-                    self.supabase.table("agent_actions").insert(actions).execute()
-                    new_cursor = last_line + len(actions)
-                    agent_cursors[session_id] = new_cursor
-                    agent_inserted += len(actions)
-                except Exception:
-                    log.exception("Failed to insert %d actions for %s/%s",
-                                  len(actions), agent_id, session_id)
-
-                # Extract signals for signal-producing agents
+                # Extract signals for signal-producing agents (independent of actions)
                 if agent_id in SIGNAL_AGENTS:
                     signal_last_line = agent_signal_cursors.get(session_id, 0)
                     try:
@@ -906,20 +914,29 @@ class SyncDaemon:
 
                     # Extract URL from arguments
                     url = self._extract_url_from_args(args, args_str)
-                    if not url:
+
+                    # For web_search, use query as title even without URL
+                    if not url and tool_name in ("web_search", "brave_search"):
+                        query = args.get("query") or args.get("search_query") or ""
+                        if not query:
+                            tool_call_index += 1
+                            continue
+                        url = ""
+                        title = query[:255]
+                        platform = "other"
+                    elif not url:
                         tool_call_index += 1
                         continue
-
-                    # Extract title from arguments or tool result
-                    title = self._extract_title_from_args(args, tool_name)
-                    if not title:
-                        title = url[:120]
+                    else:
+                        # Extract title from arguments or tool result
+                        title = self._extract_title_from_args(args, tool_name)
+                        if not title:
+                            title = url[:120]
+                        # Platform from domain
+                        platform = self._platform_from_url(url)
 
                     # Summary from following assistant text or args
                     summary = last_assistant_text[:500] if last_assistant_text else args_str[:500]
-
-                    # Platform from domain
-                    platform = self._platform_from_url(url)
 
                     # Deterministic UUID
                     det_id = str(uuid.uuid5(
@@ -933,11 +950,11 @@ class SyncDaemon:
                         "summary": summary,
                         "source_url": url[:2000],
                         "source_platform": platform,
-                        "subcategory": "seo",
+                        "subcategory": "knowledge",
                         "impact_level": "moyen",
                         "relevance_score": 50,
                         "status": "raw",
-                        "agent_id": agent_id,
+                        "collected_by": agent_id,
                     })
 
                     tool_call_index += 1
@@ -1259,15 +1276,16 @@ class SyncDaemon:
         for sig in signals:
             text = f"{sig.get('title', '')} {sig.get('summary', '')}".lower()
 
-            # Classify subcategory by keyword matching
-            subcategory = sig.get("subcategory", "seo")
-            for cat, keywords in rules["subcategory"].items():
+            # Classify by keyword matching → internal tag → DB subcategory
+            tag = None
+            for t, keywords in rules["tags"].items():
                 if any(kw in text for kw in keywords):
-                    subcategory = cat
+                    tag = t
                     break
 
-            impact_level = rules["impact_for_subcategory"].get(subcategory, "faible")
-            relevance_score = rules["score_for_subcategory"].get(subcategory, 40)
+            subcategory = SIGNAL_TAG_TO_SUBCATEGORY.get(tag, "knowledge") if tag else "knowledge"
+            impact_level = rules["impact_for_tag"].get(tag, "faible") if tag else "faible"
+            relevance_score = rules["score_for_tag"].get(tag, 40) if tag else 40
 
             try:
                 self.supabase.table("signal_items").update({
