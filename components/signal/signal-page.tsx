@@ -10,6 +10,7 @@ import { SignalStatsSidebar } from "./signal-stats-sidebar"
 import { SignalPlaceholderTab } from "./signal-placeholder-tab"
 import type { SignalItem, SignalSource, SignalImpact, SignalStatus, SignalTab } from "@/lib/signal-data"
 import { createClient } from "@/lib/supabase/client"
+import { SignalSourcesDialog } from "./signal-sources-dialog"
 
 // DB → Frontend mapping (duplicated from queries.ts to avoid module-level createClient)
 const IMPACT_MAP: Record<string, SignalImpact> = {
@@ -54,6 +55,7 @@ export function SignalPage() {
   const [activeTab, setActiveTab] = useState<SignalTab>("knowledge")
   const [signals, setSignals] = useState<SignalItem[]>([])
   const [loading, setLoading] = useState(true)
+  const [sourcesOpen, setSourcesOpen] = useState(false)
   const [filters, setFilters] = useState<FilterState>({
     sources: [],
     impacts: [],
@@ -173,6 +175,7 @@ export function SignalPage() {
           variant="outline"
           size="sm"
           className="border-slate-700 bg-slate-800/60 text-slate-300 hover:bg-slate-700 hover:text-slate-100 text-xs gap-2"
+          onClick={() => setSourcesOpen(true)}
         >
           <Settings2 size={13} />
           Configurer les sources
@@ -245,6 +248,8 @@ export function SignalPage() {
           </div>
         </div>
       )}
+
+      <SignalSourcesDialog open={sourcesOpen} onOpenChange={setSourcesOpen} />
     </div>
   )
 }
