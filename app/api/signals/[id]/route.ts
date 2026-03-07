@@ -67,8 +67,39 @@ export async function PATCH(
       return NextResponse.json({ error: 'Signal not found' }, { status: 404 })
     }
 
-    // If dispatching, create a gateway_command to wake the target agent
+    // If dispatching, create handover_message + gateway_command wake
     if (status === 'dispatched' && dispatched_to) {
+      // 1. Create handover_message for tracking
+      const { data: handover, error: hoError } = await supabase
+        .from('handover_messages')
+        .insert({
+          from_agent: 'dashboard',
+          to_agent: dispatched_to,
+          content: `Signal dispatché: ${data.title}\n\n${(data.summary || '').slice(0, 500)}`,
+          priority: data.impact_level === 'critique' ? 'high' : data.impact_level === 'fort' ? 'high' : 'medium',
+          status: 'sent',
+          related_signal_id: id,
+          data: {
+            signal: {
+              id,
+              title: data.title,
+              source_url: data.source_url,
+              source_platform: data.source_platform,
+              subcategory: data.subcategory,
+            },
+          },
+        })
+        .select('id')
+        .single()
+
+      if (hoError) {
+        console.error('Failed to create handover message:', hoError)
+      }
+
+      // 2. Create gateway_command wake with [HANDOVER] context
+      const handoverId = handover?.id || 'unknown'
+      const wakeMessage = `[HANDOVER ${handoverId}] Signal dispatché pour analyse.\n\nTitre: ${data.title}\nSource: ${data.source_url || 'N/A'}\nPlateforme: ${data.source_platform}\n\nRésumé: ${(data.summary || '').slice(0, 800)}\n\nConsulte tes handovers: python3 /root/sync-daemon/handover-cli.py pending ${dispatched_to}`
+
       const { error: cmdError } = await supabase
         .from('gateway_commands')
         .insert({
@@ -78,12 +109,12 @@ export async function PATCH(
             signal_id: id,
             title: data.title,
             summary: data.summary,
+            message: wakeMessage,
           },
         })
 
       if (cmdError) {
         console.error('Failed to create gateway command for dispatch:', cmdError)
-        // Don't fail the whole request — signal was already updated
       }
     }
 

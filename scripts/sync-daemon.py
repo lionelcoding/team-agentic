@@ -1486,6 +1486,11 @@ class SyncDaemon:
             identifier = source.get("source_identifier", "")
             subcategory = source.get("subcategory", "knowledge")
             settings = source.get("settings") or {}
+            # Merge table-level filter columns into settings dict
+            for col in ("min_views", "min_likes", "min_comments", "min_impressions"):
+                val = source.get(col)
+                if val and col not in settings:
+                    settings[col] = val
             name = source.get("name", identifier)
 
             if not identifier:
@@ -1594,7 +1599,7 @@ class SyncDaemon:
         ns = {"atom": "http://www.w3.org/2005/Atom"}
         rss_items = root.findall(".//item")
         if rss_items:
-            for item in rss_items[:25]:
+            for item in rss_items[:3]:
                 title = (item.findtext("title") or "").strip()
                 link = (item.findtext("link") or "").strip()
                 desc = self._strip_html((item.findtext("description") or ""))
@@ -1605,7 +1610,7 @@ class SyncDaemon:
         else:
             # Atom: <entry>
             entries = root.findall("atom:entry", ns) or root.findall("{http://www.w3.org/2005/Atom}entry")
-            for entry in entries[:25]:
+            for entry in entries[:3]:
                 title = (entry.findtext("atom:title", namespaces=ns)
                          or entry.findtext("{http://www.w3.org/2005/Atom}title") or "").strip()
                 link_el = (entry.find("atom:link", ns)
@@ -1624,7 +1629,7 @@ class SyncDaemon:
     def _fetch_reddit(self, identifier: str, subcategory: str) -> list[dict]:
         """Fetch Reddit subreddit new posts via public JSON API."""
         sub = identifier.strip("/").split("/")[-1]  # handle "r/startups" or just "startups"
-        url = f"https://www.reddit.com/r/{sub}/new.json?limit=25"
+        url = f"https://www.reddit.com/r/{sub}/new.json?limit=3"
         body = self._curl_get(url, user_agent="sync-daemon/1.0 (signal monitoring)")
         if not body:
             return []
@@ -1669,7 +1674,7 @@ class SyncDaemon:
         ns = {"atom": "http://www.w3.org/2005/Atom", "yt": "http://www.youtube.com/xml/schemas/2015"}
         items = []
         entries = root.findall("atom:entry", ns)
-        for entry in entries[:25]:
+        for entry in entries[:3]:
             title = (entry.findtext("atom:title", namespaces=ns) or "").strip()
             video_id = (entry.findtext("yt:videoId", namespaces=ns) or "").strip()
             link_el = entry.find("atom:link", ns)
@@ -1745,7 +1750,7 @@ class SyncDaemon:
             return []
 
         items = []
-        for entry in arr[:25]:
+        for entry in arr[:3]:
             if not isinstance(entry, dict):
                 continue
             title = str(entry.get("title") or entry.get("name") or entry.get("headline") or "")
@@ -1768,7 +1773,9 @@ class SyncDaemon:
             log.warning("APIFY_TOKEN not set, skipping %s", actor_id)
             return []
 
-        url = (f"https://api.apify.com/v2/acts/{actor_id}/run-sync-get-dataset-items"
+        # Apify API uses ~ separator for username/actor-name in URLs
+        actor_id_url = actor_id.replace("/", "~")
+        url = (f"https://api.apify.com/v2/acts/{actor_id_url}/run-sync-get-dataset-items"
                f"?token={APIFY_TOKEN}")
         input_json = json.dumps(run_input)
         try:
@@ -1782,7 +1789,11 @@ class SyncDaemon:
             if result.returncode != 0:
                 log.warning("Apify actor %s curl failed (exit %d)", actor_id, result.returncode)
                 return []
-            return json.loads(result.stdout) if result.stdout.strip() else []
+            data = json.loads(result.stdout) if result.stdout.strip() else []
+            if isinstance(data, dict) and "error" in data:
+                log.warning("Apify actor %s returned error: %s", actor_id, str(data["error"])[:200])
+                return []
+            return data
         except subprocess.TimeoutExpired:
             log.warning("Apify actor %s timed out", actor_id)
             return []
@@ -1805,6 +1816,15 @@ class SyncDaemon:
         if not raw:
             return []
 
+        # Handle dict response (some actors wrap results)
+        if isinstance(raw, dict):
+            for k in ("items", "results", "data", "tweets"):
+                if k in raw and isinstance(raw[k], list):
+                    raw = raw[k]
+                    break
+            else:
+                raw = [raw]
+
         # Post-fetch filters from signal_sources.settings
         min_views = settings.get("min_views", 0)
         min_likes = settings.get("min_likes", 0)
@@ -1813,6 +1833,9 @@ class SyncDaemon:
         items = []
         for tweet in raw:
             if not isinstance(tweet, dict):
+                continue
+            # Skip mock/padding tweets from pay-per-result actors
+            if tweet.get("type") == "mock_tweet":
                 continue
             tweet_id = str(tweet.get("id") or tweet.get("tweetId") or "")
             text = tweet.get("text") or tweet.get("full_text") or ""
@@ -1840,7 +1863,9 @@ class SyncDaemon:
             det_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"twitter-{handle}-{tweet_id or text[:50]}"))
             items.append(self._make_signal(det_id, title, summary, link, "twitter", subcategory))
 
-        log.info("Twitter @%s: %d items (%d filtered)", handle, len(items), len(raw) - len(items))
+        filtered = len(raw) - len(items)
+        items = items[:3]  # Limit to 3 for testing
+        log.info("Twitter @%s: %d items (%d filtered)", handle, len(items), filtered)
         return items
 
     def _fetch_linkedin(self, identifier: str, subcategory: str) -> list[dict]:
@@ -1848,7 +1873,7 @@ class SyncDaemon:
         slug = identifier.strip("/").split("/")[-1]  # handle full URL or slug
         raw = self._run_apify_actor("get-leads/linkedin-scraper", {
             "urls": [f"https://linkedin.com/company/{slug}/posts/"],
-            "maxResults": 10,
+            "maxResults": 3,
         })
         if not raw:
             return []
@@ -1874,7 +1899,7 @@ class SyncDaemon:
         name = identifier.strip()
         raw = self._run_apify_actor("curious_coder/crunchbase-scraper", {
             "query": name,
-            "maxResults": 10,
+            "maxResults": 3,
         })
         if not raw:
             return []
