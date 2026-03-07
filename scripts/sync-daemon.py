@@ -328,9 +328,11 @@ class SyncDaemon:
             self._parse_sessions_loop(),
             self._push_usage_cost_loop(),
             self._sync_crons_loop(),
-            self._process_signals_loop(),
+            # Loop F disabled — manual classification via dashboard
+            # self._process_signals_loop(),
             self._fetch_signal_sources_loop(),
-            self._auto_dispatch_loop(),
+            # Loop H disabled — manual dispatch via dashboard
+            # self._auto_dispatch_loop(),
         )
         log.info("Sync daemon stopped")
 
