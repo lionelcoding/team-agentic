@@ -14,9 +14,20 @@ Reads credentials from /root/.sync-daemon.env
 import json
 import os
 import sys
+import subprocess
+
+# Auto-activate venv if supabase not available (VPS: system python3 lacks it)
+try:
+    from supabase import create_client
+except ImportError:
+    venv_python = os.path.join(os.path.dirname(os.path.abspath(__file__)), "venv", "bin", "python3")
+    if os.path.isfile(venv_python):
+        os.execv(venv_python, [venv_python] + sys.argv)
+    else:
+        print("Error: supabase module not found. Install it or set up venv.")
+        sys.exit(1)
 
 from dotenv import load_dotenv
-from supabase import create_client
 
 load_dotenv("/root/.sync-daemon.env")
 
