@@ -14,6 +14,7 @@ import {
   DollarSign,
   Settings,
   Zap,
+  FolderKanban,
 } from 'lucide-react'
 
 interface NavItem {
@@ -42,6 +43,7 @@ const navItems: NavItem[] = [
     badge: 2,
     badgeColor: 'red',
   },
+  { label: 'Projets', icon: FolderKanban, href: '/projects' },
   { label: 'Analytics', icon: BarChart3, href: '/analytics' },
   { label: 'Rewards', icon: Trophy, href: '/rewards' },
   { label: 'Co\u00fbts', icon: DollarSign, href: '/costs' },

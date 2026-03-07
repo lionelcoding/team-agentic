@@ -37,6 +37,7 @@ const routeMap: Record<string, Crumb[]> = {
     { label: 'Outbound', href: '/signal/outbound' },
   ],
   '/handover': [{ label: 'Handover', href: '/handover' }],
+  '/projects': [{ label: 'Projets', href: '/projects' }],
   '/analytics': [{ label: 'Analytics', href: '/analytics' }],
   '/rewards': [{ label: 'Rewards', href: '/rewards' }],
   '/costs': [{ label: 'Coûts', href: '/costs' }],

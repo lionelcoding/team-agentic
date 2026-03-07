@@ -130,6 +130,26 @@ export async function PATCH(
       if (cmdError) {
         console.error('Failed to create gateway command for dispatch:', cmdError)
       }
+
+      // 3. Create project for tracking
+      const priority = data.impact_level === 'critique' ? 'urgent' : data.impact_level === 'fort' ? 'high' : 'normal'
+      const { error: projError } = await supabase
+        .from('projects')
+        .insert({
+          name: data.title,
+          description: (data.summary || '').slice(0, 500),
+          status: 'draft',
+          assigned_agent: dispatched_to,
+          related_signal_id: id,
+          related_handover_id: handoverId !== 'unknown' ? handoverId : null,
+          category: data.subcategory || 'knowledge',
+          priority,
+          created_by: 'dashboard',
+        })
+
+      if (projError) {
+        console.error('Failed to create project:', projError)
+      }
     }
 
     return NextResponse.json(data)

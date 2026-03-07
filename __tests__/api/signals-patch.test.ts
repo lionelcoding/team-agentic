@@ -216,6 +216,25 @@ describe('PATCH /api/signals/[id]', () => {
       expect(payload.message).toContain('handover-cli.py pending research')
     })
 
+    it('creates a project linked to signal and handover', async () => {
+      await PATCH(
+        makeRequest({ status: 'dispatched', dispatched_to: 'research' }),
+        { params: Promise.resolve({ id: 'sig-123' }) }
+      )
+
+      const projInsert = mockInserts.find(i => i.table === 'projects')
+      expect(projInsert).toBeDefined()
+      expect(projInsert!.data).toMatchObject({
+        name: 'Test Signal',
+        status: 'draft',
+        assigned_agent: 'research',
+        related_signal_id: 'sig-123',
+        related_handover_id: 'ho-456',
+        category: 'knowledge',
+        priority: 'normal',
+      })
+    })
+
     it('does not create handover or command for non-dispatch status', async () => {
       mockSingle.mockResolvedValue({ data: { ...SIGNAL_DATA, status: 'approved' }, error: null })
       await PATCH(makeRequest({ status: 'approved' }), { params: Promise.resolve({ id: 'sig-123' }) })
