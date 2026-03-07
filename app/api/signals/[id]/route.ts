@@ -22,7 +22,7 @@ export async function PATCH(
 
   try {
     const body = await request.json()
-    const { status, dispatched_to, action_suggestion } = body
+    const { status, dispatched_to, action_suggestion, subcategory } = body
 
     if (!status) {
       return NextResponse.json({ error: 'status is required' }, { status: 400 })
@@ -36,8 +36,22 @@ export async function PATCH(
       )
     }
 
+    if (subcategory) {
+      const validSubcategories = ['knowledge', 'strategy', 'outbound_inbound']
+      if (!validSubcategories.includes(subcategory)) {
+        return NextResponse.json(
+          { error: `Invalid subcategory. Use one of: ${validSubcategories.join(', ')}` },
+          { status: 400 }
+        )
+      }
+    }
+
     // Build update payload
     const updateData: Record<string, unknown> = { status }
+
+    if (subcategory) {
+      updateData.subcategory = subcategory
+    }
 
     if (status === 'archived') {
       updateData.archived_at = new Date().toISOString()

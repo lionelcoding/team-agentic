@@ -247,4 +247,45 @@ describe('PATCH /api/signals/[id]', () => {
       consoleSpy.mockRestore()
     })
   })
+
+  describe('subcategory update', () => {
+    it('includes subcategory in update when provided', async () => {
+      await PATCH(
+        makeRequest({ status: 'approved', subcategory: 'strategy' }),
+        { params: Promise.resolve({ id: 'sig-123' }) }
+      )
+      expect(mockUpdateData?.subcategory).toBe('strategy')
+    })
+
+    it('accepts all valid subcategories', async () => {
+      const validSubcategories = ['knowledge', 'strategy', 'outbound_inbound']
+      for (const subcategory of validSubcategories) {
+        mockSingle.mockResolvedValue({ data: { ...SIGNAL_DATA, subcategory }, error: null })
+        const res = await PATCH(
+          makeRequest({ status: 'approved', subcategory }),
+          { params: Promise.resolve({ id: 'sig-123' }) }
+        )
+        expect(res.status).toBe(200)
+        expect(mockUpdateData?.subcategory).toBe(subcategory)
+      }
+    })
+
+    it('returns 400 for invalid subcategory', async () => {
+      const res = await PATCH(
+        makeRequest({ status: 'approved', subcategory: 'invalid_cat' }),
+        { params: Promise.resolve({ id: 'sig-123' }) }
+      )
+      expect(res.status).toBe(400)
+      const json = await res.json()
+      expect(json.error).toContain('Invalid subcategory')
+    })
+
+    it('does not include subcategory when not provided', async () => {
+      await PATCH(
+        makeRequest({ status: 'approved' }),
+        { params: Promise.resolve({ id: 'sig-123' }) }
+      )
+      expect(mockUpdateData).not.toHaveProperty('subcategory')
+    })
+  })
 })

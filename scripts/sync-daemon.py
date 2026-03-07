@@ -1534,6 +1534,7 @@ class SyncDaemon:
             "custom_api": self._fetch_custom_api,
             "linkedin_company": self._fetch_linkedin,
             "crunchbase_company": self._fetch_crunchbase,
+            "scrapling_blog": self._fetch_scrapling_blog,
         }
         fetcher = fetchers.get(source_type)
         if not fetcher:
@@ -1922,7 +1923,41 @@ class SyncDaemon:
         log.info("Crunchbase '%s': %d items", name, len(items))
         return items
 
-    # -- Signal item factory ------------------------------------------------
+    # -- Scrapling fetcher --------------------------------------------------
+
+    def _fetch_scrapling_blog(self, identifier: str, subcategory: str) -> list[dict]:
+        """Fetch blog articles using Scrapling (bypasses anti-bot protection)."""
+        try:
+            from scrapling.fetchers import Fetcher
+        except ImportError:
+            log.warning("scrapling not installed, skipping %s", identifier)
+            return []
+
+        try:
+            page = Fetcher.get(identifier)
+        except Exception as exc:
+            log.warning("Scrapling fetch failed for %s: %s", identifier, exc)
+            return []
+
+        items = []
+        seen = set()
+        for a in page.css("h2 a, h3 a"):
+            href = a.attrib.get("href", "")
+            title = (a.css("::text").get() or "").strip()
+            if not title or not href or href in seen:
+                continue
+            # Only keep links that look like blog articles
+            parsed = urlparse(href)
+            if "/blog/" not in parsed.path and "/article" not in parsed.path:
+                continue
+            seen.add(href)
+            det_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"scrapling-{identifier}-{href}"))
+            items.append(self._make_signal(det_id, title, "", href, "blog", subcategory))
+            if len(items) >= 3:
+                break
+
+        log.info("Scrapling %s: %d items", identifier[:60], len(items))
+        return items
 
     @staticmethod
     def _make_signal(det_id: str, title: str, summary: str, source_url: str,

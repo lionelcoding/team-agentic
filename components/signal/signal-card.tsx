@@ -1,7 +1,7 @@
 "use client"
 
 import { useState } from "react"
-import { ExternalLink, Check, X, Send, Building2 } from "lucide-react"
+import { ExternalLink, Check, X, Send, Building2, Tag } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import {
   DropdownMenu,
@@ -53,12 +53,19 @@ const STATUS_CONFIG = {
   },
 }
 
+const SUBCATEGORY_OPTIONS = [
+  { value: "knowledge", label: "Knowledge", color: "text-emerald-400" },
+  { value: "strategy", label: "Strategy", color: "text-amber-400" },
+  { value: "outbound_inbound", label: "Outbound", color: "text-blue-400" },
+]
+
 interface SignalCardProps {
   signal: SignalItem
   onStatusChange: (id: string, status: string, dispatchedTo?: string) => void
+  onSubcategoryChange?: (id: string, subcategory: string) => void
 }
 
-export function SignalCard({ signal, onStatusChange }: SignalCardProps) {
+export function SignalCard({ signal, onStatusChange, onSubcategoryChange }: SignalCardProps) {
   const [isUpdating, setIsUpdating] = useState(false)
   const impact = IMPACT_CONFIG[signal.impact]
   const statusCfg = STATUS_CONFIG[signal.status]
@@ -127,10 +134,45 @@ export function SignalCard({ signal, onStatusChange }: SignalCardProps) {
 
       {/* Status + Actions */}
       <div className="flex items-center justify-between gap-2">
-        {/* Status indicator */}
-        <div className="flex items-center gap-1.5">
-          <span className={`w-2 h-2 rounded-full ${statusCfg.dot} ${signal.status === "pending" ? "animate-pulse" : ""}`} />
-          <span className="text-xs text-slate-400">{statusCfg.label}</span>
+        {/* Status indicator + Category */}
+        <div className="flex items-center gap-2">
+          <div className="flex items-center gap-1.5">
+            <span className={`w-2 h-2 rounded-full ${statusCfg.dot} ${signal.status === "pending" ? "animate-pulse" : ""}`} />
+            <span className="text-xs text-slate-400">{statusCfg.label}</span>
+          </div>
+
+          {signal.status === "pending" && onSubcategoryChange && (
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="h-6 px-2 text-[10px] text-slate-400 hover:text-slate-200 hover:bg-slate-800 border border-slate-700/50 gap-1"
+                >
+                  <Tag size={10} />
+                  {SUBCATEGORY_OPTIONS.find(o => o.value === signal.tab || (o.value === "outbound_inbound" && signal.tab === "outbound"))?.label || signal.tab}
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent
+                className="bg-slate-900 border-slate-700 text-slate-50 w-40"
+                align="start"
+              >
+                <DropdownMenuLabel className="text-slate-400 text-xs">
+                  Catégorie
+                </DropdownMenuLabel>
+                <DropdownMenuSeparator className="bg-slate-700" />
+                {SUBCATEGORY_OPTIONS.map((opt) => (
+                  <DropdownMenuItem
+                    key={opt.value}
+                    className="text-xs hover:bg-slate-800 cursor-pointer gap-2"
+                    onClick={() => onSubcategoryChange(signal.id, opt.value)}
+                  >
+                    <span className={`text-xs font-medium ${opt.color}`}>{opt.label}</span>
+                  </DropdownMenuItem>
+                ))}
+              </DropdownMenuContent>
+            </DropdownMenu>
+          )}
         </div>
 
         {/* Action buttons */}

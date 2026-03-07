@@ -147,6 +147,25 @@ export function SignalPage() {
     }
   }
 
+  const handleSubcategoryChange = async (id: string, subcategory: string) => {
+    try {
+      const signal = signals.find(s => s.id === id)
+      const currentStatus = signal?.status === "pending" ? "tagged" : signal?.status || "tagged"
+      const res = await fetch(`/api/signals/${id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ status: currentStatus, subcategory }),
+      })
+
+      if (!res.ok) {
+        const err = await res.json()
+        console.error("Failed to update subcategory:", err)
+      }
+    } catch (err) {
+      console.error("Failed to update subcategory:", err)
+    }
+  }
+
   if (loading) {
     return (
       <div className="flex flex-col items-center justify-center py-20 gap-3">
@@ -237,6 +256,7 @@ export function SignalPage() {
                       key={signal.id}
                       signal={signal}
                       onStatusChange={handleStatusChange}
+                      onSubcategoryChange={handleSubcategoryChange}
                     />
                   ))}
                 </div>
