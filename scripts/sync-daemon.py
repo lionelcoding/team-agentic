@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """sync-daemon.py — Bridge between Supabase gateway_commands and OpenClaw CLI.
 
-Runs six concurrent loops:
+Runs eight concurrent loops:
   A) poll_commands      — every 5s, picks up pending commands and executes them
   B) sync_agent_status  — every 30s, reads OpenClaw health and updates agents table
   C) parse_sessions     — every 60s, parses JSONL session files → agent_actions + signal_items
   D) push_usage_cost    — every 5min, reads openclaw usage-cost → cost_entries
   E) sync_crons         — every 5min, reads openclaw cron list → cron_schedule
   F) process_signals    — every 5min, classifies raw signals → tagged
+  G) fetch_sources      — every 10min, reads signal_sources → fetches content → signal_items
+  H) auto_dispatch      — every 5min, dispatches high-score tagged signals → handover_messages + wake agent
 
 Pattern DA-6 "sortant uniquement": all connections are outbound from VPS to Supabase.
 """
@@ -23,6 +25,7 @@ import signal
 import subprocess
 import sys
 import uuid
+import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from urllib.parse import urlparse
 
@@ -39,6 +42,13 @@ JSONL_PARSE_INTERVAL = 60    # seconds — Loop C
 USAGE_COST_INTERVAL = 300    # seconds — Loop D (5 min)
 CRON_SYNC_INTERVAL = 300     # seconds — Loop E (5 min)
 SIGNAL_PROCESS_INTERVAL = 300  # seconds — Loop F (5 min)
+SOURCE_FETCH_INTERVAL = 600    # seconds — Loop G (10 min)
+AUTO_DISPATCH_INTERVAL = 300   # seconds — Loop H (5 min)
+AUTO_DISPATCH_MIN_SCORE = 60   # minimum relevance_score for auto-dispatch
+
+# Source fetching
+SOURCE_CURSOR_FILE = "/tmp/sync-daemon-source-cursors.json"
+APIFY_TOKEN = os.environ.get("APIFY_TOKEN", "")
 
 # Session JSONL parsing
 SESSIONS_BASE = "/root/.openclaw/agents"
@@ -98,9 +108,23 @@ SIGNAL_CLASSIFICATION_RULES = {
     },
 }
 
+# Auto-dispatch: subcategory → (primary_agent, fallback_agent)
+DISPATCH_ROUTING = {
+    "knowledge":        ("research",  "architect"),
+    "strategy":         ("architect", "research"),
+    "outbound_inbound": ("outbound",  "tam"),
+}
+
+# Impact level → handover priority
+IMPACT_TO_PRIORITY = {
+    "fort":   "high",
+    "moyen":  "normal",
+    "faible": "low",
+}
+
 # Command map: name → callable(agent_id, payload) → list of CLI args
 COMMANDS: dict[str, callable] = {
-    "wake":      lambda aid, _: ["openclaw", "agent", "--agent", aid, "--message", "wake up — resume your current tasks", "--json"],
+    "wake":      lambda aid, p: ["openclaw", "agent", "--agent", aid, "--message", p.get("message", "wake up — resume your current tasks"), "--json"],
     "sleep":     lambda aid, _: ["openclaw", "agent", "--agent", aid, "--message", "go to sleep — save state and stop", "--json"],
     "heartbeat": lambda _, __: ["openclaw", "system", "heartbeat", "enable"],
     "health":    lambda _, __: ["openclaw", "health", "--json"],
@@ -305,6 +329,8 @@ class SyncDaemon:
             self._push_usage_cost_loop(),
             self._sync_crons_loop(),
             self._process_signals_loop(),
+            self._fetch_signal_sources_loop(),
+            self._auto_dispatch_loop(),
         )
         log.info("Sync daemon stopped")
 
@@ -1300,6 +1326,592 @@ class SyncDaemon:
 
         if updated:
             log.info("Classified %d raw signals → tagged", updated)
+
+    # ------------------------------------------------------------------
+    # Loop H: auto-dispatch tagged signals → handover_messages + wake
+    # ------------------------------------------------------------------
+
+    async def _auto_dispatch_loop(self):
+        while self.running:
+            try:
+                await self._auto_dispatch_signals()
+            except Exception:
+                log.exception("Error in auto_dispatch")
+            await asyncio.sleep(AUTO_DISPATCH_INTERVAL)
+
+    async def _auto_dispatch_signals(self):
+        if self.dry_run:
+            log.info("[DRY-RUN] Would auto-dispatch signals")
+            return
+
+        # Fetch tagged signals with high relevance score, not yet dispatched
+        try:
+            resp = self.supabase.table("signal_items") \
+                .select("*") \
+                .eq("status", "tagged") \
+                .gte("relevance_score", AUTO_DISPATCH_MIN_SCORE) \
+                .order("relevance_score", desc=True) \
+                .limit(10) \
+                .execute()
+        except Exception:
+            log.exception("Failed to query tagged signals for dispatch")
+            return
+
+        signals = resp.data or []
+        if not signals:
+            return
+
+        dispatched = 0
+        for sig in signals:
+            subcategory = sig.get("subcategory", "knowledge")
+            routing = DISPATCH_ROUTING.get(subcategory, ("research", "architect"))
+            target_agent = routing[0]
+            priority = IMPACT_TO_PRIORITY.get(sig.get("impact_level", "moyen"), "normal")
+
+            # Build handover brief
+            brief = (
+                f"Signal détecté — {sig.get('impact_level', 'moyen').upper()} impact\n\n"
+                f"**{sig.get('title', 'Sans titre')}**\n\n"
+                f"{sig.get('summary', '')}\n\n"
+                f"Source: {sig.get('source_url', 'N/A')} ({sig.get('source_platform', 'unknown')})\n"
+                f"Catégorie: {subcategory} | Score: {sig.get('relevance_score', 0)}"
+            )
+
+            try:
+                # 1. INSERT handover_message (return id)
+                ho_resp = self.supabase.table("handover_messages").insert({
+                    "from_agent": "monitor",
+                    "to_agent": target_agent,
+                    "content": brief,
+                    "priority": priority,
+                    "status": "sent",
+                    "related_signal_id": sig["id"],
+                    "data": {
+                        "signal": {
+                            "id": sig["id"],
+                            "title": sig.get("title"),
+                            "summary": sig.get("summary"),
+                            "source_url": sig.get("source_url"),
+                            "source_platform": sig.get("source_platform"),
+                            "subcategory": subcategory,
+                            "impact_level": sig.get("impact_level"),
+                            "relevance_score": sig.get("relevance_score"),
+                        },
+                        "routing": {
+                            "primary": routing[0],
+                            "fallback": routing[1],
+                        },
+                    },
+                }).execute()
+                ho_id = ho_resp.data[0]["id"] if ho_resp.data else "UNKNOWN"
+
+                # 2. UPDATE signal → dispatched
+                self.supabase.table("signal_items").update({
+                    "status": "dispatched",
+                    "dispatched_to": target_agent,
+                    "dispatched_at": datetime.now(timezone.utc).isoformat(),
+                }).eq("id", sig["id"]).execute()
+
+                # 3. INSERT gateway_command → wake target agent with handover context
+                wake_message = (
+                    f"[HANDOVER {ho_id}] Tu as reçu un signal à traiter.\n\n"
+                    f"Titre: {sig.get('title', 'Sans titre')}\n"
+                    f"Résumé: {sig.get('summary', '')[:500]}\n"
+                    f"Source: {sig.get('source_url', 'N/A')}\n"
+                    f"Impact: {sig.get('impact_level', 'moyen')} | Catégorie: {subcategory}\n\n"
+                    f"Instructions:\n"
+                    f"1. Lis le fichier HANDOVER.md dans ton workspace pour le protocole complet\n"
+                    f"2. Consulte la source URL si disponible\n"
+                    f"3. Produis un livrable adapté à ton rôle\n"
+                    f"4. Quand terminé, exécute:\n"
+                    f"   /root/sync-daemon/venv/bin/python3 /root/sync-daemon/handover-cli.py complete {ho_id} \"<ton résumé du travail effectué>\""
+                )
+                self.supabase.table("gateway_commands").insert({
+                    "command": "wake",
+                    "agent_id": target_agent,
+                    "payload": {
+                        "signal_id": sig["id"],
+                        "title": sig.get("title"),
+                        "summary": sig.get("summary"),
+                        "source_url": sig.get("source_url"),
+                        "handover_id": ho_id,
+                        "message": wake_message,
+                    },
+                }).execute()
+
+                dispatched += 1
+            except Exception:
+                log.exception("Failed to dispatch signal %s", sig["id"])
+
+        if dispatched:
+            log.info("Auto-dispatched %d signal(s) → agents", dispatched)
+
+    # ------------------------------------------------------------------
+    # Loop G: fetch signal_sources → signal_items (10min)
+    # ------------------------------------------------------------------
+    async def _fetch_signal_sources_loop(self):
+        while self.running:
+            try:
+                await self._fetch_signal_sources()
+            except Exception:
+                log.exception("Error in fetch_signal_sources")
+            await asyncio.sleep(SOURCE_FETCH_INTERVAL)
+
+    async def _fetch_signal_sources(self):
+        if self.dry_run:
+            log.info("[DRY-RUN] Would fetch signal sources")
+            return
+
+        try:
+            resp = self.supabase.table("signal_sources") \
+                .select("*") \
+                .eq("enabled", True) \
+                .execute()
+        except Exception:
+            log.exception("Failed to query signal_sources")
+            return
+
+        sources = resp.data or []
+        if not sources:
+            return
+
+        cursors = self._load_source_cursors()
+        total = 0
+
+        for source in sources:
+            source_id = source.get("id", "")
+            source_type = source.get("source_type", "")
+            identifier = source.get("source_identifier", "")
+            subcategory = source.get("subcategory", "knowledge")
+            settings = source.get("settings") or {}
+            name = source.get("name", identifier)
+
+            if not identifier:
+                continue
+
+            try:
+                items = self._fetch_source(source_type, identifier, subcategory, settings)
+            except Exception:
+                log.exception("Failed to fetch source %s (%s: %s)", name, source_type, identifier)
+                continue
+
+            if not items:
+                continue
+
+            try:
+                self.supabase.table("signal_items").upsert(
+                    items, on_conflict="id"
+                ).execute()
+                total += len(items)
+                cursors[source_id] = datetime.now(timezone.utc).isoformat()
+            except Exception:
+                log.exception("Failed to upsert %d items from source %s", len(items), name)
+
+        self._save_source_cursors(cursors)
+        if total:
+            log.info("Loop G: fetched %d signal_items from %d source(s)", total, len(sources))
+
+    def _fetch_source(self, source_type: str, identifier: str, subcategory: str,
+                      settings: dict | None = None) -> list[dict]:
+        """Dispatch to the right fetcher based on source_type."""
+        settings = settings or {}
+        # Twitter accepts settings for engagement filters
+        if source_type == "twitter_handle":
+            return self._fetch_twitter(identifier, subcategory, settings)
+
+        fetchers = {
+            "rss_feed": self._fetch_rss,
+            "reddit_subreddit": self._fetch_reddit,
+            "youtube_channel": self._fetch_youtube,
+            "bodacc_filter": self._fetch_bodacc,
+            "custom_api": self._fetch_custom_api,
+            "linkedin_company": self._fetch_linkedin,
+            "crunchbase_company": self._fetch_crunchbase,
+        }
+        fetcher = fetchers.get(source_type)
+        if not fetcher:
+            log.warning("Unknown source_type: %s", source_type)
+            return []
+        return fetcher(identifier, subcategory)
+
+    # -- Source cursor persistence ------------------------------------------
+
+    def _load_source_cursors(self) -> dict:
+        try:
+            with open(SOURCE_CURSOR_FILE, "r") as f:
+                return json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            return {}
+
+    def _save_source_cursors(self, cursors: dict):
+        with open(SOURCE_CURSOR_FILE, "w") as f:
+            json.dump(cursors, f)
+
+    # -- Direct fetchers (0€) -----------------------------------------------
+
+    @staticmethod
+    def _strip_html(text: str) -> str:
+        """Remove HTML tags and decode common entities."""
+        text = re.sub(r"<[^>]+>", " ", text)
+        text = text.replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", '"').replace("&#39;", "'")
+        return re.sub(r"\s+", " ", text).strip()
+
+    def _curl_get(self, url: str, *, timeout: int = 15, user_agent: str = "sync-daemon/1.0") -> str | None:
+        """Run curl and return stdout, or None on failure."""
+        try:
+            result = subprocess.run(
+                ["curl", "-s", "-L", "--max-time", str(timeout),
+                 "-A", user_agent, url],
+                capture_output=True, text=True, timeout=timeout + 5,
+            )
+            if result.returncode != 0:
+                log.warning("curl failed for %s (exit %d)", url, result.returncode)
+                return None
+            return result.stdout
+        except subprocess.TimeoutExpired:
+            log.warning("curl timed out for %s", url)
+            return None
+        except Exception:
+            log.exception("curl error for %s", url)
+            return None
+
+    def _fetch_rss(self, identifier: str, subcategory: str) -> list[dict]:
+        """Fetch RSS/Atom feed via curl + xml.etree."""
+        body = self._curl_get(identifier)
+        if not body:
+            return []
+
+        items = []
+        try:
+            root = ET.fromstring(body)
+        except ET.ParseError:
+            log.warning("Invalid XML from RSS feed: %s", identifier)
+            return []
+
+        # RSS 2.0: <channel><item>
+        ns = {"atom": "http://www.w3.org/2005/Atom"}
+        rss_items = root.findall(".//item")
+        if rss_items:
+            for item in rss_items[:25]:
+                title = (item.findtext("title") or "").strip()
+                link = (item.findtext("link") or "").strip()
+                desc = self._strip_html((item.findtext("description") or ""))
+                if not title:
+                    continue
+                det_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"rss-{identifier}-{link or title}"))
+                items.append(self._make_signal(det_id, title, desc, link, "rss", subcategory))
+        else:
+            # Atom: <entry>
+            entries = root.findall("atom:entry", ns) or root.findall("{http://www.w3.org/2005/Atom}entry")
+            for entry in entries[:25]:
+                title = (entry.findtext("atom:title", namespaces=ns)
+                         or entry.findtext("{http://www.w3.org/2005/Atom}title") or "").strip()
+                link_el = (entry.find("atom:link", ns)
+                           or entry.find("{http://www.w3.org/2005/Atom}link"))
+                link = link_el.get("href", "") if link_el is not None else ""
+                summary = self._strip_html(entry.findtext("atom:summary", namespaces=ns)
+                           or entry.findtext("{http://www.w3.org/2005/Atom}summary") or "")
+                if not title:
+                    continue
+                det_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"rss-{identifier}-{link or title}"))
+                items.append(self._make_signal(det_id, title, summary, link, "rss", subcategory))
+
+        log.info("RSS %s: %d items", identifier[:60], len(items))
+        return items
+
+    def _fetch_reddit(self, identifier: str, subcategory: str) -> list[dict]:
+        """Fetch Reddit subreddit new posts via public JSON API."""
+        sub = identifier.strip("/").split("/")[-1]  # handle "r/startups" or just "startups"
+        url = f"https://www.reddit.com/r/{sub}/new.json?limit=25"
+        body = self._curl_get(url, user_agent="sync-daemon/1.0 (signal monitoring)")
+        if not body:
+            return []
+
+        try:
+            data = json.loads(body)
+        except json.JSONDecodeError:
+            log.warning("Invalid JSON from Reddit: %s", sub)
+            return []
+
+        items = []
+        children = data.get("data", {}).get("children", [])
+        for child in children:
+            post = child.get("data", {})
+            post_id = post.get("id", "")
+            title = post.get("title", "").strip()
+            selftext = post.get("selftext", "")[:500]
+            permalink = post.get("permalink", "")
+            link = f"https://www.reddit.com{permalink}" if permalink else post.get("url", "")
+            if not title:
+                continue
+            det_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"reddit-{sub}-{post_id}"))
+            items.append(self._make_signal(det_id, title, selftext, link, "reddit", subcategory))
+
+        log.info("Reddit r/%s: %d items", sub, len(items))
+        return items
+
+    def _fetch_youtube(self, identifier: str, subcategory: str) -> list[dict]:
+        """Fetch YouTube channel RSS feed (native Atom)."""
+        channel_id = identifier.strip()
+        url = f"https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}"
+        body = self._curl_get(url)
+        if not body:
+            return []
+
+        try:
+            root = ET.fromstring(body)
+        except ET.ParseError:
+            log.warning("Invalid XML from YouTube feed: %s", channel_id)
+            return []
+
+        ns = {"atom": "http://www.w3.org/2005/Atom", "yt": "http://www.youtube.com/xml/schemas/2015"}
+        items = []
+        entries = root.findall("atom:entry", ns)
+        for entry in entries[:25]:
+            title = (entry.findtext("atom:title", namespaces=ns) or "").strip()
+            video_id = (entry.findtext("yt:videoId", namespaces=ns) or "").strip()
+            link_el = entry.find("atom:link", ns)
+            link = link_el.get("href", "") if link_el is not None else ""
+            summary = (entry.findtext("atom:summary", namespaces=ns)
+                       or entry.findtext("{http://search.yahoo.com/mrss/}group/{http://search.yahoo.com/mrss/}description")
+                       or "").strip()
+            if not title:
+                continue
+            det_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"youtube-{channel_id}-{video_id or title}"))
+            items.append(self._make_signal(det_id, title, summary, link, "youtube", subcategory))
+
+        log.info("YouTube %s: %d items", channel_id[:20], len(items))
+        return items
+
+    def _fetch_bodacc(self, identifier: str, subcategory: str) -> list[dict]:
+        """Fetch BODACC announcements via OpenDataSoft API."""
+        from urllib.parse import quote
+        q = quote(identifier)
+        url = (f"https://bodacc-datadila.opendatasoft.com/api/records/1.0/search/"
+               f"?dataset=annonces-commerciales&q={q}&rows=25&sort=dateparution")
+        body = self._curl_get(url)
+        if not body:
+            return []
+
+        try:
+            data = json.loads(body)
+        except json.JSONDecodeError:
+            log.warning("Invalid JSON from BODACC: %s", identifier)
+            return []
+
+        items = []
+        for record in data.get("records", []):
+            rec_id = record.get("recordid", "")
+            fields = record.get("fields", {})
+            title = fields.get("commercant", fields.get("denomination", ""))
+            if not title:
+                title = fields.get("registre", rec_id)
+            desc = fields.get("descriptif", "")
+            date_pub = fields.get("dateparution", "")
+            link = f"https://www.bodacc.fr/annonce/detail/{rec_id}" if rec_id else ""
+            summary = f"{desc} (publié le {date_pub})" if date_pub else desc
+
+            det_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"bodacc-{rec_id}"))
+            items.append(self._make_signal(det_id, title[:255], summary[:2000], link, "bodacc", subcategory))
+
+        log.info("BODACC '%s': %d items", identifier[:40], len(items))
+        return items
+
+    def _fetch_custom_api(self, identifier: str, subcategory: str) -> list[dict]:
+        """Fetch a custom JSON API endpoint."""
+        body = self._curl_get(identifier)
+        if not body:
+            return []
+
+        try:
+            data = json.loads(body)
+        except json.JSONDecodeError:
+            log.warning("Invalid JSON from custom API: %s", identifier[:60])
+            return []
+
+        # Find the array: root array, or common keys
+        arr = None
+        if isinstance(data, list):
+            arr = data
+        elif isinstance(data, dict):
+            for key in ("items", "results", "data", "entries", "records"):
+                if key in data and isinstance(data[key], list):
+                    arr = data[key]
+                    break
+        if not arr:
+            log.warning("No array found in custom API response: %s", identifier[:60])
+            return []
+
+        items = []
+        for entry in arr[:25]:
+            if not isinstance(entry, dict):
+                continue
+            title = str(entry.get("title") or entry.get("name") or entry.get("headline") or "")
+            if not title:
+                continue
+            summary = str(entry.get("summary") or entry.get("description") or entry.get("body", ""))
+            link = str(entry.get("url") or entry.get("link") or entry.get("href") or "")
+            item_id = str(entry.get("id") or entry.get("_id") or title)
+            det_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"custom-{identifier[:80]}-{item_id}"))
+            items.append(self._make_signal(det_id, title[:255], summary[:2000], link[:2000], "other", subcategory))
+
+        log.info("Custom API %s: %d items", identifier[:60], len(items))
+        return items
+
+    # -- Apify fetchers (free tier) ------------------------------------------
+
+    def _run_apify_actor(self, actor_id: str, run_input: dict) -> list[dict]:
+        """Run an Apify actor synchronously and return dataset items."""
+        if not APIFY_TOKEN:
+            log.warning("APIFY_TOKEN not set, skipping %s", actor_id)
+            return []
+
+        url = (f"https://api.apify.com/v2/acts/{actor_id}/run-sync-get-dataset-items"
+               f"?token={APIFY_TOKEN}")
+        input_json = json.dumps(run_input)
+        try:
+            result = subprocess.run(
+                ["curl", "-s", "-X", "POST", url,
+                 "-H", "Content-Type: application/json",
+                 "-d", input_json,
+                 "--max-time", "90"],
+                capture_output=True, text=True, timeout=100,
+            )
+            if result.returncode != 0:
+                log.warning("Apify actor %s curl failed (exit %d)", actor_id, result.returncode)
+                return []
+            return json.loads(result.stdout) if result.stdout.strip() else []
+        except subprocess.TimeoutExpired:
+            log.warning("Apify actor %s timed out", actor_id)
+            return []
+        except json.JSONDecodeError:
+            log.warning("Apify actor %s returned invalid JSON", actor_id)
+            return []
+        except Exception:
+            log.exception("Apify actor %s error", actor_id)
+            return []
+
+    def _fetch_twitter(self, identifier: str, subcategory: str, settings: dict | None = None) -> list[dict]:
+        """Fetch tweets via Apify kaitoeasyapi scraper (includes viewCount)."""
+        handle = identifier.lstrip("@")
+        settings = settings or {}
+
+        raw = self._run_apify_actor(
+            "kaitoeasyapi/twitter-x-data-tweet-scraper-pay-per-result-cheapest",
+            {"user_names": [handle], "maxItems": 20},
+        )
+        if not raw:
+            return []
+
+        # Post-fetch filters from signal_sources.settings
+        min_views = settings.get("min_views", 0)
+        min_likes = settings.get("min_likes", 0)
+        min_retweets = settings.get("min_retweets", 0)
+
+        items = []
+        for tweet in raw:
+            if not isinstance(tweet, dict):
+                continue
+            tweet_id = str(tweet.get("id") or tweet.get("tweetId") or "")
+            text = tweet.get("text") or tweet.get("full_text") or ""
+            if not text:
+                continue
+
+            # Apply engagement filters
+            if (tweet.get("viewCount") or 0) < min_views:
+                continue
+            if (tweet.get("likeCount") or 0) < min_likes:
+                continue
+            if (tweet.get("retweetCount") or 0) < min_retweets:
+                continue
+
+            title = text[:255]
+            link = f"https://x.com/{handle}/status/{tweet_id}" if tweet_id else ""
+
+            # Enrich summary with engagement metrics
+            metrics = (f"👁 {tweet.get('viewCount', 0)} · "
+                       f"♥ {tweet.get('likeCount', 0)} · "
+                       f"🔁 {tweet.get('retweetCount', 0)} · "
+                       f"💬 {tweet.get('replyCount', 0)}")
+            summary = f"{metrics}\n{text[:1900]}"
+
+            det_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"twitter-{handle}-{tweet_id or text[:50]}"))
+            items.append(self._make_signal(det_id, title, summary, link, "twitter", subcategory))
+
+        log.info("Twitter @%s: %d items (%d filtered)", handle, len(items), len(raw) - len(items))
+        return items
+
+    def _fetch_linkedin(self, identifier: str, subcategory: str) -> list[dict]:
+        """Fetch LinkedIn company posts via Apify scraper."""
+        slug = identifier.strip("/").split("/")[-1]  # handle full URL or slug
+        raw = self._run_apify_actor("get-leads/linkedin-scraper", {
+            "urls": [f"https://linkedin.com/company/{slug}/posts/"],
+            "maxResults": 10,
+        })
+        if not raw:
+            return []
+
+        items = []
+        for post in raw:
+            if not isinstance(post, dict):
+                continue
+            post_id = str(post.get("id") or post.get("postId") or post.get("urn") or "")
+            text = post.get("text") or post.get("commentary") or post.get("title") or ""
+            if not text:
+                continue
+            title = text[:255]
+            link = post.get("url") or post.get("postUrl") or ""
+            det_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"linkedin-{slug}-{post_id or text[:50]}"))
+            items.append(self._make_signal(det_id, title, text[:2000], link[:2000], "linkedin", subcategory))
+
+        log.info("LinkedIn %s: %d items", slug, len(items))
+        return items
+
+    def _fetch_crunchbase(self, identifier: str, subcategory: str) -> list[dict]:
+        """Fetch Crunchbase company info via Apify scraper."""
+        name = identifier.strip()
+        raw = self._run_apify_actor("curious_coder/crunchbase-scraper", {
+            "query": name,
+            "maxResults": 10,
+        })
+        if not raw:
+            return []
+
+        items = []
+        for entry in raw:
+            if not isinstance(entry, dict):
+                continue
+            item_id = str(entry.get("id") or entry.get("uuid") or entry.get("permalink") or "")
+            title = entry.get("name") or entry.get("organization_name") or ""
+            if not title:
+                continue
+            desc = entry.get("short_description") or entry.get("description") or ""
+            link = entry.get("url") or entry.get("crunchbase_url") or ""
+            if not link and entry.get("permalink"):
+                link = f"https://www.crunchbase.com/organization/{entry['permalink']}"
+            det_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"crunchbase-{name}-{item_id or title}"))
+            items.append(self._make_signal(det_id, title[:255], desc[:2000], link[:2000], "other", subcategory))
+
+        log.info("Crunchbase '%s': %d items", name, len(items))
+        return items
+
+    # -- Signal item factory ------------------------------------------------
+
+    @staticmethod
+    def _make_signal(det_id: str, title: str, summary: str, source_url: str,
+                     platform: str, subcategory: str) -> dict:
+        return {
+            "id": det_id,
+            "title": title[:255],
+            "summary": summary[:2000],
+            "source_url": source_url[:2000],
+            "source_platform": platform,
+            "subcategory": subcategory,
+            "impact_level": "moyen",
+            "relevance_score": 50,
+            "status": "raw",
+            "collected_by": "monitor",
+        }
 
 
 # ---------------------------------------------------------------------------

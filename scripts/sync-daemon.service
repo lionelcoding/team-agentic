@@ -1,0 +1,17 @@
+[Unit]
+Description=Team Agentic Sync Daemon
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/sync-daemon
+ExecStart=/root/sync-daemon/venv/bin/python3 /root/sync-daemon/sync-daemon.py
+EnvironmentFile=/root/.sync-daemon.env
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
