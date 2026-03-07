@@ -73,7 +73,7 @@ export async function PATCH(
       const { data: handover, error: hoError } = await supabase
         .from('handover_messages')
         .insert({
-          from_agent: 'dashboard',
+          from_agent: 'main',
           to_agent: dispatched_to,
           content: `Signal dispatché: ${data.title}\n\n${(data.summary || '').slice(0, 500)}`,
           priority: data.impact_level === 'critique' ? 'urgent' : data.impact_level === 'fort' ? 'high' : 'normal',

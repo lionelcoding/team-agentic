@@ -142,7 +142,7 @@ describe('PATCH /api/signals/[id]', () => {
       const hoInsert = mockInserts.find(i => i.table === 'handover_messages')
       expect(hoInsert).toBeDefined()
       expect(hoInsert!.data).toMatchObject({
-        from_agent: 'dashboard',
+        from_agent: 'main',
         to_agent: 'research',
         status: 'sent',
         related_signal_id: 'sig-123',
