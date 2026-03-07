@@ -2,15 +2,30 @@
 
 import { useState, useEffect, useMemo, useCallback } from "react"
 import {
-  FolderKanban, LayoutGrid, Table2, Loader2, ExternalLink,
-  X, ChevronRight, Clock, CheckCheck, AlertTriangle, Play, Pause,
+  FolderKanban, LayoutGrid, Table2, Loader2,
+  ChevronRight, Clock, CheckCheck, AlertTriangle, Play, Pause,
 } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { createClient } from "@/lib/supabase/client"
+import ProjectDetailModal from "@/components/projects/project-detail-modal"
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 type ProjectStatus = "draft" | "validating" | "running" | "completed" | "failed" | "paused"
+
+interface SuccessMetric {
+  name: string
+  baseline: string | number
+  target: string | number
+  actual: string | number | null
+  type: 'quanti' | 'quali'
+}
+
+interface ProjectStep {
+  label: string
+  done: boolean
+  agent?: string
+}
 
 interface Project {
   id: string
@@ -28,6 +43,16 @@ interface Project {
   created_by: string | null
   created_at: string
   updated_at: string
+  objective: string | null
+  success_metrics: SuccessMetric[] | null
+  steps: ProjectStep[] | null
+  complexity: 'simple' | 'moyen' | 'complexe' | null
+  deadline: string | null
+  tools_resources: string[] | null
+  risks: string[] | null
+  okr: string | null
+  artifact_content: string | null
+  artifact_path: string | null
 }
 
 interface Column {
@@ -79,129 +104,7 @@ function relTime(iso: string): string {
   return `il y a ${Math.floor(h / 24)}j`
 }
 
-// ─── Project Detail Modal ─────────────────────────────────────────────────────
-
-function ProjectDetailModal({ project, onClose, onStatusChange }: {
-  project: Project
-  onClose: () => void
-  onStatusChange: (id: string, status: ProjectStatus) => void
-}) {
-  const priority = PRIORITY_STYLES[project.priority || "normal"] || PRIORITY_STYLES.normal
-  const category = CATEGORY_STYLES[project.category || "knowledge"] || CATEGORY_STYLES.knowledge
-  const result = project.results as Record<string, unknown> | null
-
-  const nextStatuses: { status: ProjectStatus; label: string }[] = {
-    draft:      [{ status: "validating", label: "Valider" }, { status: "running", label: "Démarrer" }],
-    validating: [{ status: "running", label: "Démarrer" }, { status: "draft", label: "Retour brouillon" }],
-    running:    [{ status: "completed", label: "Terminer" }, { status: "failed", label: "Échoué" }, { status: "paused", label: "Pause" }],
-    paused:     [{ status: "running", label: "Reprendre" }, { status: "failed", label: "Échoué" }],
-    completed:  [{ status: "draft", label: "Ré-ouvrir" }],
-    failed:     [{ status: "draft", label: "Ré-ouvrir" }],
-  }[project.status] || []
-
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4" onClick={onClose}>
-      <div className="absolute inset-0 bg-black/70" />
-      <div className="relative bg-slate-900 border border-slate-800 rounded-xl w-full max-w-lg p-5 shadow-2xl max-h-[80vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
-        <div className="flex items-start justify-between mb-4">
-          <div className="flex-1 min-w-0">
-            <h2 className="text-base font-bold text-slate-100 leading-tight">{project.name}</h2>
-            {project.description && (
-              <p className="text-sm text-slate-400 mt-1 line-clamp-3">{project.description}</p>
-            )}
-          </div>
-          <button onClick={onClose} className="text-slate-500 hover:text-slate-300 ml-3 mt-1">
-            <X className="w-5 h-5" />
-          </button>
-        </div>
-
-        {/* Info grid */}
-        <div className="grid grid-cols-2 gap-3 mb-4">
-          <div className="bg-slate-800/60 rounded-lg p-3">
-            <p className="text-[10px] text-slate-500 uppercase tracking-wide">Agent</p>
-            <div className="flex items-center gap-2 mt-1">
-              {project.assigned_agent && (
-                <span className={cn("w-5 h-5 rounded-full text-white text-[9px] font-bold flex items-center justify-center", AGENT_COLORS[project.assigned_agent] || "bg-slate-600")}>
-                  {project.assigned_agent.slice(0, 2).toUpperCase()}
-                </span>
-              )}
-              <span className="text-sm font-medium text-slate-200">{project.assigned_agent || "—"}</span>
-            </div>
-          </div>
-          <div className="bg-slate-800/60 rounded-lg p-3">
-            <p className="text-[10px] text-slate-500 uppercase tracking-wide">Priorité</p>
-            <span className={cn("inline-flex items-center text-xs font-medium px-1.5 py-0.5 rounded border mt-1", priority.cls)}>{priority.label}</span>
-          </div>
-          <div className="bg-slate-800/60 rounded-lg p-3">
-            <p className="text-[10px] text-slate-500 uppercase tracking-wide">Catégorie</p>
-            <span className={cn("text-sm font-medium mt-1", category.cls)}>{category.label}</span>
-          </div>
-          <div className="bg-slate-800/60 rounded-lg p-3">
-            <p className="text-[10px] text-slate-500 uppercase tracking-wide">Créé</p>
-            <p className="text-sm font-medium text-slate-200 mt-1">{relTime(project.created_at)}</p>
-          </div>
-          {project.started_at && (
-            <div className="bg-slate-800/60 rounded-lg p-3">
-              <p className="text-[10px] text-slate-500 uppercase tracking-wide">Démarré</p>
-              <p className="text-sm font-medium text-slate-200 mt-1">{relTime(project.started_at)}</p>
-            </div>
-          )}
-          {project.completed_at && (
-            <div className="bg-slate-800/60 rounded-lg p-3">
-              <p className="text-[10px] text-slate-500 uppercase tracking-wide">Terminé</p>
-              <p className="text-sm font-medium text-slate-200 mt-1">{relTime(project.completed_at)}</p>
-            </div>
-          )}
-        </div>
-
-        {/* Results */}
-        {result && Object.keys(result).length > 0 && (
-          <div className="bg-emerald-950/30 border border-emerald-800/40 rounded-md p-3 mb-4">
-            <p className="text-xs font-semibold text-emerald-400 mb-1">Résultats</p>
-            <pre className="text-xs text-slate-300 whitespace-pre-wrap overflow-auto max-h-40">
-              {JSON.stringify(result, null, 2)}
-            </pre>
-          </div>
-        )}
-
-        {/* Links */}
-        <div className="flex flex-wrap gap-2 mb-4">
-          {project.related_signal_id && (
-            <a
-              href={`/signal`}
-              className="flex items-center gap-1 text-xs text-blue-400 hover:text-blue-300 bg-slate-800 rounded px-2 py-1"
-            >
-              <ExternalLink className="w-3 h-3" /> Signal source
-            </a>
-          )}
-          {project.related_handover_id && (
-            <a
-              href={`/handover`}
-              className="flex items-center gap-1 text-xs text-purple-400 hover:text-purple-300 bg-slate-800 rounded px-2 py-1"
-            >
-              <ExternalLink className="w-3 h-3" /> Handover lié
-            </a>
-          )}
-        </div>
-
-        {/* Actions */}
-        {nextStatuses.length > 0 && (
-          <div className="flex flex-wrap gap-2">
-            {nextStatuses.map(ns => (
-              <button
-                key={ns.status}
-                onClick={() => onStatusChange(project.id, ns.status)}
-                className="px-3 py-1.5 text-sm font-medium rounded-lg border border-slate-700 text-slate-300 hover:bg-slate-800 transition-colors"
-              >
-                {ns.label}
-              </button>
-            ))}
-          </div>
-        )}
-      </div>
-    </div>
-  )
-}
+// ─── Project Detail Modal (imported from components/projects/project-detail-modal) ────
 
 // ─── Project Card ─────────────────────────────────────────────────────────────
 
@@ -245,10 +148,15 @@ function ProjectCard({ project, onClick, onDragStart }: {
         <span className="text-[10px] text-slate-600">{relTime(project.created_at)}</span>
       </div>
 
-      <div className="flex items-center gap-1.5 mt-2 opacity-0 group-hover:opacity-100 transition-opacity">
-        <span className={cn("text-[10px] font-medium", category.cls)}>{category.label}</span>
+      <div className="flex items-center gap-1.5 mt-2">
+        <span className={cn("text-[10px] font-medium opacity-0 group-hover:opacity-100 transition-opacity", category.cls)}>{category.label}</span>
         {project.related_signal_id && (
-          <span className="text-[10px] text-slate-600">· signal</span>
+          <span className="text-[10px] text-slate-600 opacity-0 group-hover:opacity-100 transition-opacity">· signal</span>
+        )}
+        {project.objective && project.status === 'draft' && (
+          <span className="ml-auto text-[9px] font-bold text-emerald-400 bg-emerald-600/20 border border-emerald-700/30 px-1.5 py-0.5 rounded">
+            Plan proposé
+          </span>
         )}
       </div>
     </div>

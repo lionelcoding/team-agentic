@@ -81,7 +81,7 @@ export async function PATCH(
       return NextResponse.json({ error: 'Signal not found' }, { status: 404 })
     }
 
-    // If dispatching, create handover_message + gateway_command wake
+    // If dispatching, create handover_message + project + gateway_command wake
     if (status === 'dispatched' && dispatched_to) {
       // 1. Create handover_message for tracking
       const { data: handover, error: hoError } = await supabase
@@ -110,30 +110,10 @@ export async function PATCH(
         console.error('Failed to create handover message:', hoError)
       }
 
-      // 2. Create gateway_command wake with [HANDOVER] context
+      // 2. Create project FIRST (need project_id for wake message)
       const handoverId = handover?.id || 'unknown'
-      const wakeMessage = `[HANDOVER ${handoverId}] Signal dispatché pour analyse.\n\nTitre: ${data.title}\nSource: ${data.source_url || 'N/A'}\nPlateforme: ${data.source_platform}\n\nRésumé: ${(data.summary || '').slice(0, 800)}\n\nConsulte tes handovers: python3 /root/sync-daemon/handover-cli.py pending ${dispatched_to}`
-
-      const { error: cmdError } = await supabase
-        .from('gateway_commands')
-        .insert({
-          command: 'wake',
-          agent_id: dispatched_to,
-          payload: {
-            signal_id: id,
-            title: data.title,
-            summary: data.summary,
-            message: wakeMessage,
-          },
-        })
-
-      if (cmdError) {
-        console.error('Failed to create gateway command for dispatch:', cmdError)
-      }
-
-      // 3. Create project for tracking
       const priority = data.impact_level === 'critique' ? 'urgent' : data.impact_level === 'fort' ? 'high' : 'normal'
-      const { error: projError } = await supabase
+      const { data: project, error: projError } = await supabase
         .from('projects')
         .insert({
           name: data.title,
@@ -146,9 +126,33 @@ export async function PATCH(
           priority,
           created_by: 'dashboard',
         })
+        .select('id')
+        .single()
 
       if (projError) {
         console.error('Failed to create project:', projError)
+      }
+
+      // 3. Create gateway_command wake with plan-first instructions
+      const projectId = project?.id || 'unknown'
+      const wakeMessage = `[HANDOVER ${handoverId}] Signal dispatché pour qualification.\n\nTitre: ${data.title}\nSource: ${data.source_url || 'N/A'}\n\nINSTRUCTIONS:\n1. Analyse le signal (consulte la source URL)\n2. Propose un plan structuré via:\n   python3 /root/sync-daemon/handover-cli.py message ${projectId} '<plan JSON>' --type plan_proposal\n3. NE PAS exécuter. Attends la validation humaine.`
+
+      const { error: cmdError } = await supabase
+        .from('gateway_commands')
+        .insert({
+          command: 'wake',
+          agent_id: dispatched_to,
+          payload: {
+            signal_id: id,
+            project_id: projectId,
+            title: data.title,
+            summary: data.summary,
+            message: wakeMessage,
+          },
+        })
+
+      if (cmdError) {
+        console.error('Failed to create gateway command for dispatch:', cmdError)
       }
     }
 

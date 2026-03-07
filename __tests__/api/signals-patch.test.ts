@@ -197,7 +197,7 @@ describe('PATCH /api/signals/[id]', () => {
       expect(ho3!.data.priority).toBe('normal')
     })
 
-    it('inserts a gateway_command with [HANDOVER] message', async () => {
+    it('inserts a gateway_command with plan-first instructions', async () => {
       await PATCH(
         makeRequest({ status: 'dispatched', dispatched_to: 'research' }),
         { params: Promise.resolve({ id: 'sig-123' }) }
@@ -211,9 +211,13 @@ describe('PATCH /api/signals/[id]', () => {
       })
       const payload = cmdInsert!.data.payload as Record<string, unknown>
       expect(payload.signal_id).toBe('sig-123')
+      expect(payload.project_id).toBeDefined()
       expect(payload.message).toContain('[HANDOVER ho-456]')
       expect(payload.message).toContain('Test Signal')
-      expect(payload.message).toContain('handover-cli.py pending research')
+      expect(payload.message).toContain('qualification')
+      expect(payload.message).toContain('handover-cli.py message')
+      expect(payload.message).toContain('plan_proposal')
+      expect(payload.message).toContain('NE PAS exécuter')
     })
 
     it('creates a project linked to signal and handover', async () => {
