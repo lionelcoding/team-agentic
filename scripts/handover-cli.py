@@ -51,9 +51,11 @@ def cmd_pending(agent_id: str):
 
 
 def cmd_complete(handover_id: str, result_text: str):
-    """Mark a handover as completed with a result."""
+    """Mark a handover as completed with a result, update linked project."""
     sb = get_client()
     from datetime import datetime, timezone
+
+    now = datetime.now(timezone.utc).isoformat()
 
     # Get existing data to merge
     resp = sb.table("handover_messages") \
@@ -64,11 +66,11 @@ def cmd_complete(handover_id: str, result_text: str):
 
     existing_data = resp.data.get("data") or {}
     existing_data["result"] = result_text
-    existing_data["completed_at"] = datetime.now(timezone.utc).isoformat()
+    existing_data["completed_at"] = now
 
     sb.table("handover_messages").update({
         "status": "completed",
-        "acted_at": datetime.now(timezone.utc).isoformat(),
+        "acted_at": now,
         "data": existing_data,
     }).eq("id", handover_id).execute()
 
@@ -78,6 +80,25 @@ def cmd_complete(handover_id: str, result_text: str):
         sb.table("signal_items").update({
             "status": "archived",
         }).eq("id", signal_id).execute()
+
+    # Update linked project → completed with results
+    try:
+        proj_resp = sb.table("projects") \
+            .select("id") \
+            .eq("related_handover_id", handover_id) \
+            .execute()
+
+        projects = proj_resp.data or []
+        for proj in projects:
+            sb.table("projects").update({
+                "status": "completed",
+                "completed_at": now,
+                "results": {"summary": result_text},
+                "updated_at": now,
+            }).eq("id", proj["id"]).execute()
+            print(f"Project {proj['id']} marked as completed.")
+    except Exception as e:
+        print(f"Warning: could not update linked project: {e}")
 
     print(f"Handover {handover_id} marked as completed.")
 
