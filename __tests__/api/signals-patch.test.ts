@@ -218,6 +218,8 @@ describe('PATCH /api/signals/[id]', () => {
       expect(payload.message).toContain('handover-cli.py message')
       expect(payload.message).toContain('plan_proposal')
       expect(payload.message).toContain('NE PAS exécuter')
+      expect(payload.message).toContain('FORMAT JSON REQUIS')
+      expect(payload.message).toContain('"objective"')
     })
 
     it('creates a project linked to signal and handover', async () => {

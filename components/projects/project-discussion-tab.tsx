@@ -27,38 +27,88 @@ const TYPE_ICONS: Record<string, typeof Bot> = {
   feedback: User,
 }
 
+function normalizePlan(raw: Record<string, unknown>): Record<string, unknown> {
+  // Agent may wrap in {"plan": {...}} or {"type":"plan_proposal","plan":{...}}
+  const plan = (typeof raw.plan === 'object' && raw.plan !== null ? raw.plan : raw) as Record<string, unknown>
+  const result: Record<string, unknown> = { ...plan }
+
+  // Fallback objective from topic/title/description
+  if (!result.objective) {
+    result.objective = plan.topic || plan.title || plan.description || plan.summary
+  }
+
+  // Fallback steps from actions
+  if (!result.steps && Array.isArray(plan.actions)) {
+    result.steps = (plan.actions as Record<string, unknown>[]).map(a => ({
+      label: a.step || a.label || a.description || JSON.stringify(a),
+      done: false,
+      priority: a.priority,
+    }))
+  }
+
+  // Fallback complexity from relevance
+  if (!result.complexity && plan.relevance) {
+    const relMap: Record<string, string> = { high: 'complexe', medium: 'moyen', low: 'simple' }
+    result.complexity = relMap[plan.relevance as string] || plan.relevance
+  }
+
+  // Fallback risks from notes
+  if (!result.risks && plan.notes) {
+    result.risks = [plan.notes]
+  }
+
+  return result
+}
+
 function PlanProposalCard({ content }: { content: string }) {
   try {
-    const plan = JSON.parse(content)
+    const raw = JSON.parse(content)
+    const plan = normalizePlan(raw)
+
+    // Check if we got anything meaningful to display
+    const hasContent = plan.objective || plan.steps || plan.success_metrics || plan.risks || plan.complexity
+    if (!hasContent) {
+      return (
+        <div className="bg-slate-700/40 rounded-md p-2.5 text-xs">
+          <pre className="text-slate-300 whitespace-pre-wrap">{JSON.stringify(raw, null, 2)}</pre>
+        </div>
+      )
+    }
+
+    const steps = plan.steps as { label: string; priority?: string }[] | undefined
+    const metrics = plan.success_metrics as { name: string; target: string | number }[] | undefined
+    const risks = plan.risks as (string | { description: string })[] | undefined
+
     return (
       <div className="bg-slate-700/40 rounded-md p-2.5 text-xs space-y-1.5">
-        {plan.objective && <p><span className="text-slate-500">Objectif:</span> <span className="text-slate-200">{plan.objective}</span></p>}
-        {plan.complexity && <p><span className="text-slate-500">Complexité:</span> <span className="text-slate-200">{plan.complexity}</span></p>}
-        {plan.steps && (
+        {plan.objective && <p><span className="text-slate-500">Objectif:</span> <span className="text-slate-200">{String(plan.objective)}</span></p>}
+        {plan.complexity && <p><span className="text-slate-500">Complexité:</span> <span className="text-slate-200">{String(plan.complexity)}</span></p>}
+        {plan.okr || plan.qualification ? <p><span className="text-slate-500">Qualification:</span> <span className="text-slate-200">{String(plan.okr || plan.qualification)}</span></p> : null}
+        {steps && steps.length > 0 && (
           <div>
             <span className="text-slate-500">Étapes:</span>
             <ul className="ml-3 mt-0.5">
-              {plan.steps.map((s: { label: string }, i: number) => (
-                <li key={i} className="text-slate-300">• {s.label || s}</li>
+              {steps.map((s, i) => (
+                <li key={i} className="text-slate-300">• {s.label || String(s)}{s.priority ? ` (${s.priority})` : ''}</li>
               ))}
             </ul>
           </div>
         )}
-        {plan.success_metrics && (
+        {metrics && metrics.length > 0 && (
           <div>
             <span className="text-slate-500">Métriques:</span>
             <ul className="ml-3 mt-0.5">
-              {plan.success_metrics.map((m: { name: string; target: string | number }, i: number) => (
+              {metrics.map((m, i) => (
                 <li key={i} className="text-slate-300">• {m.name}: cible {String(m.target)}</li>
               ))}
             </ul>
           </div>
         )}
-        {plan.risks && plan.risks.length > 0 && (
+        {risks && risks.length > 0 && (
           <div>
-            <span className="text-slate-500">Risques:</span>
+            <span className="text-slate-500">Risques / Notes:</span>
             <ul className="ml-3 mt-0.5">
-              {plan.risks.map((r: string | { description: string }, i: number) => (
+              {risks.map((r, i) => (
                 <li key={i} className="text-red-400/80">• {typeof r === 'string' ? r : r.description}</li>
               ))}
             </ul>
@@ -240,20 +290,23 @@ export default function ProjectDiscussionTab({ projectId }: { projectId: string 
   )
 }
 
-export function useMessageCount(projectId: string): number {
+export function useMessageInfo(projectId: string): { count: number; planProposalContent: string | null } {
   const [count, setCount] = useState(0)
+  const [planProposalContent, setPlanProposalContent] = useState<string | null>(null)
 
   useEffect(() => {
-    const fetchCount = async () => {
+    const fetchMessages = async () => {
       try {
         const res = await fetch(`/api/projects/${projectId}/messages`)
         if (res.ok) {
-          const data = await res.json()
+          const data = await res.json() as ProjectMessage[]
           setCount(data.length)
+          const planMsg = data.find(m => m.message_type === 'plan_proposal')
+          setPlanProposalContent(planMsg?.content || null)
         }
       } catch { /* ignore */ }
     }
-    fetchCount()
+    fetchMessages()
 
     const supabase = createClient()
     const channel = supabase
@@ -263,11 +316,11 @@ export function useMessageCount(projectId: string): number {
         schema: "public",
         table: "project_messages",
         filter: `project_id=eq.${projectId}`,
-      }, () => fetchCount())
+      }, () => fetchMessages())
       .subscribe()
 
     return () => { supabase.removeChannel(channel) }
   }, [projectId])
 
-  return count
+  return { count, planProposalContent }
 }

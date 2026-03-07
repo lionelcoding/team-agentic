@@ -148,8 +148,13 @@ def cmd_message(project_id: str, content: str, message_type: str = "feedback"):
     # If plan_proposal, try to parse JSON and update project plan fields
     if message_type == "plan_proposal":
         try:
-            plan = json.loads(content)
+            raw = json.loads(content)
+            # Normalize: agent may wrap in {"plan": {...}} or {"type":"plan_proposal","plan":{...}}
+            plan = raw.get("plan", raw) if isinstance(raw, dict) else raw
+
             update_data = {}
+
+            # Direct field mapping (standard format)
             field_map = {
                 "objective": "objective",
                 "steps": "steps",
@@ -164,11 +169,45 @@ def cmd_message(project_id: str, content: str, message_type: str = "feedback"):
                 if json_key in plan:
                     update_data[db_key] = plan[json_key]
 
+            # Fallback mappings for agent's free-form format
+            if "objective" not in update_data:
+                # Try topic, title, description as objective
+                for key in ("topic", "title", "description", "summary"):
+                    if key in plan:
+                        update_data["objective"] = plan[key]
+                        break
+
+            if "steps" not in update_data and "actions" in plan:
+                # Map actions[].step/label/description → steps[].label
+                actions = plan["actions"]
+                if isinstance(actions, list):
+                    update_data["steps"] = [
+                        {"label": a.get("step") or a.get("label") or a.get("description") or str(a), "done": False}
+                        for a in actions
+                    ]
+
+            if "okr" not in update_data and "qualification" in plan:
+                update_data["okr"] = plan["qualification"]
+
+            if "complexity" not in update_data and "relevance" in plan:
+                # Map relevance → complexity
+                rel_map = {"high": "complexe", "medium": "moyen", "low": "simple"}
+                update_data["complexity"] = rel_map.get(plan["relevance"], "moyen")
+
+            if "risks" not in update_data and "notes" in plan:
+                update_data["risks"] = [plan["notes"]]
+
+            if "tools_resources" not in update_data and "tools" in plan:
+                tools = plan["tools"]
+                update_data["tools_resources"] = tools if isinstance(tools, list) else [tools]
+
             if update_data:
                 from datetime import datetime, timezone
                 update_data["updated_at"] = datetime.now(timezone.utc).isoformat()
                 sb.table("projects").update(update_data).eq("id", project_id).execute()
                 print(f"Project {project_id} plan fields updated: {list(update_data.keys())}")
+            else:
+                print("Warning: no recognized plan fields found in JSON.")
         except json.JSONDecodeError:
             print("Content is not valid JSON, skipping plan field update.")
         except Exception as e:

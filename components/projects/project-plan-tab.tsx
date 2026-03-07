@@ -36,21 +36,68 @@ const COMPLEXITY_STYLES: Record<string, { label: string; cls: string }> = {
   complexe: { label: "Complexe", cls: "bg-red-600/20 text-red-400 border-red-700/40" },
 }
 
-function hasPlan(project: Project): boolean {
+function normalizePlanFromRaw(raw: string): Partial<Project> | null {
+  try {
+    const parsed = JSON.parse(raw)
+    const plan = (typeof parsed.plan === 'object' && parsed.plan !== null ? parsed.plan : parsed) as Record<string, unknown>
+
+    const result: Partial<Project> = {}
+
+    result.objective = (plan.objective || plan.topic || plan.title || plan.description || plan.summary) as string | null
+
+    if (Array.isArray(plan.steps)) {
+      result.steps = plan.steps as ProjectStep[]
+    } else if (Array.isArray(plan.actions)) {
+      result.steps = (plan.actions as Record<string, unknown>[]).map(a => ({
+        label: (a.step || a.label || a.description || JSON.stringify(a)) as string,
+        done: false,
+      }))
+    }
+
+    if (plan.complexity) result.complexity = plan.complexity as Project['complexity']
+    else if (plan.relevance) {
+      const relMap: Record<string, 'simple' | 'moyen' | 'complexe'> = { high: 'complexe', medium: 'moyen', low: 'simple' }
+      result.complexity = relMap[plan.relevance as string] || 'moyen'
+    }
+
+    if (Array.isArray(plan.success_metrics)) result.success_metrics = plan.success_metrics as SuccessMetric[]
+    if (Array.isArray(plan.risks)) result.risks = plan.risks as string[]
+    else if (plan.notes) result.risks = [plan.notes as string]
+    if (Array.isArray(plan.tools_resources)) result.tools_resources = plan.tools_resources as string[]
+    else if (Array.isArray(plan.tools)) result.tools_resources = plan.tools as string[]
+    if (plan.okr) result.okr = plan.okr as string
+    else if (plan.qualification) result.okr = plan.qualification as string
+    if (plan.deadline) result.deadline = plan.deadline as string
+
+    return result
+  } catch {
+    return null
+  }
+}
+
+function hasPlanFields(project: Project): boolean {
   return !!(project.objective || (project.steps && project.steps.length > 0) || (project.success_metrics && project.success_metrics.length > 0))
 }
 
 export default function ProjectPlanTab({
   project,
+  rawPlanContent,
   onValidate,
   onRequestChanges,
 }: {
   project: Project
+  rawPlanContent?: string | null
   onValidate: () => void
   onRequestChanges: () => void
 }) {
-  const planReceived = hasPlan(project)
+  // Use project fields if populated, otherwise try to extract from raw message
+  const hasFields = hasPlanFields(project)
+  const rawPlan = !hasFields && rawPlanContent ? normalizePlanFromRaw(rawPlanContent) : null
+  const planReceived = hasFields || !!rawPlan
   const isDraft = project.status === 'draft'
+
+  // Merge: prefer project DB fields, fallback to raw extraction
+  const displayProject = rawPlan && !hasFields ? { ...project, ...rawPlan } : project
 
   if (!planReceived) {
     return (
@@ -62,19 +109,19 @@ export default function ProjectPlanTab({
     )
   }
 
-  const complexity = project.complexity ? COMPLEXITY_STYLES[project.complexity] : null
-  const metrics = project.success_metrics || []
-  const steps = project.steps || []
-  const tools = project.tools_resources || []
-  const risks = project.risks || []
+  const complexity = displayProject.complexity ? COMPLEXITY_STYLES[displayProject.complexity] : null
+  const metrics = displayProject.success_metrics || []
+  const steps = displayProject.steps || []
+  const tools = displayProject.tools_resources || []
+  const risks = displayProject.risks || []
 
   return (
     <div className="flex flex-col gap-4">
       {/* Objective */}
-      {project.objective && (
+      {displayProject.objective && (
         <div className="bg-slate-800/60 rounded-lg p-3">
           <p className="text-[10px] text-slate-500 uppercase tracking-wide mb-1">Objectif</p>
-          <p className="text-sm text-slate-200">{project.objective}</p>
+          <p className="text-sm text-slate-200">{displayProject.objective}</p>
         </div>
       )}
 
@@ -88,23 +135,23 @@ export default function ProjectPlanTab({
             </span>
           </div>
         )}
-        {project.deadline && (
+        {displayProject.deadline && (
           <div className="bg-slate-800/60 rounded-lg p-3">
             <p className="text-[10px] text-slate-500 uppercase tracking-wide mb-1">Deadline</p>
             <div className="flex items-center gap-1.5">
               <Calendar className="w-3.5 h-3.5 text-slate-400" />
               <span className="text-sm text-slate-200">
-                {new Date(project.deadline).toLocaleDateString('fr-FR', { day: 'numeric', month: 'short', year: 'numeric' })}
+                {new Date(displayProject.deadline).toLocaleDateString('fr-FR', { day: 'numeric', month: 'short', year: 'numeric' })}
               </span>
             </div>
           </div>
         )}
       </div>
 
-      {project.okr && (
+      {displayProject.okr && (
         <div className="bg-slate-800/60 rounded-lg p-3">
           <p className="text-[10px] text-slate-500 uppercase tracking-wide mb-1">OKR</p>
-          <p className="text-sm text-slate-200">{project.okr}</p>
+          <p className="text-sm text-slate-200">{displayProject.okr}</p>
         </div>
       )}
 

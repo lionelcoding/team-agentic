@@ -7,7 +7,7 @@ import {
 } from "lucide-react"
 import { cn } from "@/lib/utils"
 import ProjectPlanTab from "./project-plan-tab"
-import ProjectDiscussionTab, { useMessageCount } from "./project-discussion-tab"
+import ProjectDiscussionTab, { useMessageInfo } from "./project-discussion-tab"
 import ProjectResultsTab from "./project-results-tab"
 
 type ProjectStatus = "draft" | "validating" | "running" | "completed" | "failed" | "paused"
@@ -112,13 +112,14 @@ export default function ProjectDetailModal({ project, onClose, onStatusChange }:
   onStatusChange: (id: string, status: ProjectStatus) => void
 }) {
   const [activeTab, setActiveTab] = useState<Tab>('plan')
-  const messageCount = useMessageCount(project.id)
+  const { count: messageCount, planProposalContent } = useMessageInfo(project.id)
 
   const priority = PRIORITY_STYLES[project.priority || "normal"] || PRIORITY_STYLES.normal
   const statusCfg = STATUS_CONFIG[project.status]
   const StatusIcon = statusCfg.Icon
 
-  const hasPlan = !!(project.objective || (project.steps && project.steps.length > 0) || (project.success_metrics && project.success_metrics.length > 0))
+  const hasPlanFields = !!(project.objective || (project.steps && project.steps.length > 0) || (project.success_metrics && project.success_metrics.length > 0))
+  const hasPlan = hasPlanFields || !!planProposalContent
   const nextStatuses = getNextStatuses(project.status, hasPlan)
 
   const handleValidatePlan = () => {
@@ -209,6 +210,7 @@ export default function ProjectDetailModal({ project, onClose, onStatusChange }:
           {activeTab === 'plan' && (
             <ProjectPlanTab
               project={project}
+              rawPlanContent={planProposalContent}
               onValidate={handleValidatePlan}
               onRequestChanges={handleRequestChanges}
             />

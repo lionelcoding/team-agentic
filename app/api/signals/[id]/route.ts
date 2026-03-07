@@ -135,7 +135,21 @@ export async function PATCH(
 
       // 3. Create gateway_command wake with plan-first instructions
       const projectId = project?.id || 'unknown'
-      const wakeMessage = `[HANDOVER ${handoverId}] Signal dispatché pour qualification.\n\nTitre: ${data.title}\nSource: ${data.source_url || 'N/A'}\n\nINSTRUCTIONS:\n1. Analyse le signal (consulte la source URL)\n2. Propose un plan structuré via:\n   python3 /root/sync-daemon/handover-cli.py message ${projectId} '<plan JSON>' --type plan_proposal\n3. NE PAS exécuter. Attends la validation humaine.`
+      const wakeMessage = `[HANDOVER ${handoverId}] Signal dispatché pour qualification.
+
+Titre: ${data.title}
+Source: ${data.source_url || 'N/A'}
+
+INSTRUCTIONS:
+1. Analyse le signal (consulte la source URL si accessible)
+2. Propose un plan structuré via la commande ci-dessous.
+3. NE PAS exécuter le plan. Attends la validation humaine.
+
+COMMANDE:
+python3 /root/sync-daemon/handover-cli.py message ${projectId} '<JSON>' --type plan_proposal
+
+FORMAT JSON REQUIS (utilise ces clés exactes):
+{"objective":"Décris l'objectif en 1-2 phrases","steps":[{"label":"Etape 1","done":false},{"label":"Etape 2","done":false}],"success_metrics":[{"name":"Nom métrique","baseline":"valeur actuelle","target":"valeur cible","type":"quanti"}],"complexity":"simple|moyen|complexe","risks":["Risque 1"],"tools_resources":["outil1","outil2"]}`
 
       const { error: cmdError } = await supabase
         .from('gateway_commands')
