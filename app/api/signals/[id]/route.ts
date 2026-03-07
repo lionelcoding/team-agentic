@@ -76,7 +76,7 @@ export async function PATCH(
           from_agent: 'dashboard',
           to_agent: dispatched_to,
           content: `Signal dispatché: ${data.title}\n\n${(data.summary || '').slice(0, 500)}`,
-          priority: data.impact_level === 'critique' ? 'high' : data.impact_level === 'fort' ? 'high' : 'medium',
+          priority: data.impact_level === 'critique' ? 'urgent' : data.impact_level === 'fort' ? 'high' : 'normal',
           status: 'sent',
           related_signal_id: id,
           data: {
